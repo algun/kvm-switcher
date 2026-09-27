@@ -15,8 +15,10 @@ Python 3 is the only language runtime. The program uses the standard library, so
 | System | Also required |
 | --- | --- |
 | Linux | `ddcutil` (switch the monitor), `lsusb` from `usbutils` (list USB devices), systemd (login service) |
-| macOS | BetterDisplay's `betterdisplaycli` (switch the monitor). USB listing uses `ioreg`, which is already installed |
+| macOS | [BetterDisplay](https://github.com/waydabber/BetterDisplay) and its [`betterdisplaycli`](https://github.com/waydabber/betterdisplaycli) (switch the monitor). USB listing uses `ioreg`, which is already installed |
 | Windows | Nothing else. Display switching uses the Windows API, and USB listing uses PowerShell |
+
+On macOS, install the CLI with `brew install waydabber/betterdisplay/betterdisplaycli`. BetterDisplay has to be running, and CLI access has to be on (that is the default). This program sends a direct DDC input-select command. [BetterDisplay lists DDC input switching as free](https://github.com/waydabber/BetterDisplay/wiki/List-of-free-and-Pro-features) for personal use after the 14-day Pro trial. Other CLI features are Pro. A business using the app needs a Pro license even for the free features.
 
 ## Install
 
