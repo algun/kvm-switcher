@@ -1,0 +1,9 @@
+.cursor/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+*.tar.gz
+*.zip
+.DS_Store

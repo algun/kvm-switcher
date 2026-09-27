@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 -m unittest discover -s tests -v
+      - name: Check tag matches VERSION
+        run: |
+          file_ver=$(python3 -c "import re; text=open('kvm-switcher.py').read(); print(re.search(r'^VERSION = \"([^\"]+)\"', text, re.M).group(1))")
+          tag_ver="${GITHUB_REF_NAME#v}"
+          test "$file_ver" = "$tag_ver"
+      - name: Pack
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          rm -rf dist
+          mkdir -p dist/kvm-switcher
+          cp kvm-switcher.py config.json dist/kvm-switcher/
+          cp *.sh *.ps1 dist/kvm-switcher/
+          tar -C dist -czf kvm-switcher.tar.gz kvm-switcher
+          tar -C dist -czf "kvm-switcher-${ver}.tar.gz" kvm-switcher
+          (cd dist && zip -r ../kvm-switcher.zip kvm-switcher)
+          cp kvm-switcher.zip "kvm-switcher-${ver}.zip"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "kvm-switcher ${ver}" \
+            kvm-switcher.tar.gz \
+            kvm-switcher.zip \
+            "kvm-switcher-${ver}.tar.gz" \
+            "kvm-switcher-${ver}.zip"
