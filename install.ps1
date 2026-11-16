@@ -43,5 +43,19 @@ python "%LOCALAPPDATA%\kvm-switcher\kvm-switcher.py" %*
 "@ | Set-Content -Encoding ascii $shim
 
 Write-Host "Installed $shim"
+
+# The README says this puts kvm-switcher on PATH, so actually add it. Without
+# this the shim is installed but the command is not found.
+$userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
+$entries = @($userPath -split ';' | Where-Object { $_ })
+if ($entries -notcontains $bin) {
+    $newPath = (@($entries) + $bin) -join ';'
+    [System.Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+    Write-Host "Added $bin to your PATH"
+    Write-Host "Open a new terminal for it to take effect."
+} else {
+    Write-Host "$bin is already on PATH"
+}
+
 Write-Host "Then: kvm-switcher configure"
 Write-Host "Login watcher: kvm-switcher install"

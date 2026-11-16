@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 INTERVAL = 0.5
 VCP_INPUT = 0x60
 DEV_RE = re.compile(r"^([0-9a-fA-F]{4}):([0-9a-fA-F]{4})\b\s*(?:#\s*(.*))?$")
