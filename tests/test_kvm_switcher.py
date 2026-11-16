@@ -7,6 +7,7 @@ launchd, schtasks) stay manual. See README.
 from __future__ import annotations
 
 import importlib.util
+import re
 import shutil
 import subprocess
 import sys
@@ -466,6 +467,44 @@ class PortabilityTests(unittest.TestCase):
                 if isinstance(sub, ast.Attribute) and sub.attr in {"WinDLL", "WINFUNCTYPE", "windll"}:
                     offenders.append((sub.attr, getattr(sub, "lineno", 0)))
         self.assertEqual(offenders, [], "Windows-only ctypes call at module scope")
+
+
+class EncodingTests(unittest.TestCase):
+    """The source contains a non-ASCII em dash; re-saving it must not mangle it."""
+
+    def test_no_mojibake_in_tracked_text_files(self):
+        # A PowerShell Get-Content/Set-Content round-trip rewrote the em dash in
+        # "USB device detected — switching display" as UTF-8 bytes read back as
+        # cp1252, leaving "â" + euro + smart-quote. cp1252-mojibake always starts
+        # with one of a few lead characters, so match that shape rather than a
+        # literal (a literal would also match this test's own source).
+        mojibake = re.compile("[\u00c2\u00c3\u00e2][\u0080-\u00ff\u0152\u0153\u0160\u0161\u0178\u017d\u017e\u0192\u02c6\u02dc\u2013-\u203a\u20ac\u2122\ufffd]")
+
+        def looks_mangled(text: str) -> bool:
+            if text.startswith("\ufeff"):
+                return True
+            return bool(mojibake.search(text))
+
+        offenders = []
+        for path in sorted(ROOT.rglob("*")):
+            if not path.is_file() or ".git" in path.parts:
+                continue
+            if path.suffix.lower() not in {".py", ".md", ".ps1", ".sh", ".json", ".yml"}:
+                continue
+            if path == Path(__file__).resolve():
+                continue  # this file documents the pattern on purpose
+            text = path.read_text(encoding="utf-8")
+            if looks_mangled(text):
+                offenders.append(path.name)
+        self.assertEqual(offenders, [], "mangled or BOM-prefixed files")
+
+    def test_source_is_valid_utf8_without_bom(self):
+        raw = SCRIPT.read_bytes()
+        self.assertFalse(
+            raw.startswith(b"\xef\xbb\xbf"),
+            "kvm-switcher.py must not start with a BOM: its shebang is executed directly",
+        )
+        raw.decode("utf-8")  # raises if the file is not valid UTF-8
 
 
 if __name__ == "__main__":

@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-VERSION = "0.1.5"
+VERSION = "0.1.6"
 INTERVAL = 0.5
 VCP_INPUT = 0x60
 DEV_RE = re.compile(r"^([0-9a-fA-F]{4}):([0-9a-fA-F]{4})\b\s*(?:#\s*(.*))?$")
@@ -1102,7 +1102,7 @@ def _watch_loop() -> None:
             detected = False
         if detected:
             if not active:
-                print("USB device detected â€” switching display")
+                print("USB device detected — switching display")
                 switch_monitor()
                 active = True
         else:
