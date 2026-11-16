@@ -41,7 +41,11 @@ jobs:
       # or arm64. A product matrix hides that decision; here it is explicit.
       matrix:
         include:
-          - os: ubuntu-latest
+          # `ubuntu-latest` is Ubuntu 26.04 now, and actions/python-versions has
+          # no 3.9 build for it (3.9 is published for 22.04 and 24.04 only), so
+          # setup-python fails before pytest runs. The floor leg pins 24.04,
+          # matching the newest image that still carries a 3.9.
+          - os: ubuntu-24.04
             python-version: "3.9"
           - os: ubuntu-latest
             python-version: "3.12"
