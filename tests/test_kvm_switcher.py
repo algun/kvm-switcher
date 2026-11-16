@@ -550,12 +550,91 @@ def test_help_prints_doc(capsys):
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not __import__("shutil").which("bash"), reason="bash is not installed")
+# Where Git for Windows puts the shell a Windows checkout actually has. `git`
+# itself lives in `Git\cmd`, which is on PATH; `bash` does not, so `which`
+# cannot find it there.
+_WINDOWS_BASH_HINTS = (
+    r"C:\Program Files\Git\bin\bash.exe",
+    r"C:\Program Files\Git\usr\bin\bash.exe",
+)
+
+
+def _bash_runs(executable):
+    """True when the path is a shell that can actually run a command."""
+    try:
+        completed = subprocess.run(
+            [executable, "-c", "exit 0"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0
+
+
+def _usable_bash():
+    """A bash that can really run commands, or None when this machine has none.
+
+    Asking `shutil.which("bash")` is not enough, which is why this exists. The
+    windows-latest runner carries `C:\\Windows\\System32\\bash.exe`, and that
+    file is the WSL launcher rather than a POSIX shell: the name resolves, so a
+    `which` check passes, and then every `bash ...` call fails because no
+    distribution is installed. That made this test fail on Windows CI while it
+    skipped on a developer machine with no bash on PATH at all.
+
+    So a candidate is only accepted once it has proved it can run. Git Bash is
+    tried explicitly on Windows because that is the shell a Windows checkout
+    really has, and it is not on PATH under the name `bash`.
+    """
+    candidates = []
+    on_path = shutil.which("bash")
+    if on_path:
+        candidates.append(on_path)
+    if sys.platform == "win32":
+        candidates.extend(_WINDOWS_BASH_HINTS)
+    for candidate in candidates:
+        if _bash_runs(candidate):
+            return candidate
+    return None
+
+
 def test_bash_scripts_parse():
+    """Every shipped shell script must be valid bash."""
+    bash = _usable_bash()
+    if bash is None:
+        pytest.skip("no usable bash (POSIX shell) on this machine")
+
     scripts = sorted(ROOT.glob("*.sh"))
     assert len(scripts) >= 1
     for script in scripts:
-        subprocess.run(["bash", "-n", str(script)], check=True)
+        # The script goes in on stdin instead of as a path, so a shell that does
+        # not translate `C:\\...` (WSL) cannot fail on the argument. `-n` reads
+        # stdin when no file is named, which is the same syntax check.
+        with script.open("rb") as handle:
+            completed = subprocess.run(
+                [bash, "-n"], stdin=handle, capture_output=True, text=True, timeout=60
+            )
+        assert completed.returncode == 0, "{} is not valid bash: {}".format(
+            script.name, completed.stderr.strip()
+        )
+
+
+def test_bash_gate_rejects_a_bash_that_cannot_run(monkeypatch, tmp_path):
+    """The positive control for the gate above.
+
+    A file named `bash` that is not a working shell must not be accepted, or the
+    test above fails on a runner instead of skipping. The empty file stands in
+    for the WSL launcher with no distribution installed: it exists, and running
+    it does not work.
+    """
+    not_a_shell = tmp_path / "bash.exe"
+    not_a_shell.write_bytes(b"")
+
+    monkeypatch.setattr(shutil, "which", lambda _name: str(not_a_shell))
+    monkeypatch.setattr(sys.modules[__name__], "_WINDOWS_BASH_HINTS", ())
+
+    assert _usable_bash() is None
 
 
 # --------------------------------------------------------------------------
