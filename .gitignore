@@ -7,3 +7,8 @@ dist/
 *.tar.gz
 *.zip
 .DS_Store
+# Local scratch scripts, so a throwaway probe is never committed by accident.
+_probe_*.py
+_probe_*.ps1
+_release_*.ps1
+_publish.ps1

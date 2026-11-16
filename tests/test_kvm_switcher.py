@@ -585,7 +585,23 @@ class EncodingTests(unittest.TestCase):
             return bool(mojibake.search(text))
 
         offenders = []
-        for path in sorted(ROOT.rglob("*")):
+        # Scan what git tracks, not the working directory: a local scratch file
+        # that is gitignored must not fail the suite.
+        tracked = None
+        try:
+            listing = subprocess.run(
+                ["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, timeout=60
+            )
+            if listing.returncode == 0:
+                tracked = [
+                    ROOT / name
+                    for name in listing.stdout.decode("utf-8", "replace").split("\0")
+                    if name
+                ]
+        except (OSError, subprocess.SubprocessError):
+            tracked = None
+        paths = tracked if tracked is not None else sorted(ROOT.rglob("*"))
+        for path in paths:
             if not path.is_file() or ".git" in path.parts:
                 continue
             if path.suffix.lower() not in {".py", ".md", ".ps1", ".sh", ".json", ".yml"}:
