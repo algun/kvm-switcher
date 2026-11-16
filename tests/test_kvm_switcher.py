@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -469,6 +470,56 @@ class PortabilityTests(unittest.TestCase):
                 if isinstance(sub, ast.Attribute) and sub.attr in {"WinDLL", "WINFUNCTYPE", "windll"}:
                     offenders.append((sub.attr, getattr(sub, "lineno", 0)))
         self.assertEqual(offenders, [], "Windows-only ctypes call at module scope")
+
+
+class WatchLoopTests(unittest.TestCase):
+    def test_switch_is_retried_only_after_the_device_goes_away(self):
+        """A failed or repeated poll must not re-switch while the device stays."""
+        calls = []
+        sequence = [True, True, False, True, True]
+        with patch.object(ks, "load_config", return_value=ks.Config(devices=[("1234:abcd", "Dev")])), \
+             patch.object(ks, "devices_present", side_effect=sequence), \
+             patch.object(ks, "switch_monitor", side_effect=lambda *a: calls.append(1)), \
+             patch.object(ks, "time", **{"sleep": lambda _s: None}), \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(StopIteration):
+                ks._watch_loop()
+        # True,True (one switch) then False then True,True (second switch)
+        self.assertEqual(len(calls), 2)
+
+    def test_failed_switch_does_not_retry_every_poll(self):
+        """If switching raises, the flag must stay set so the screen does not
+        flash once per poll."""
+        calls = []
+        sequence = [True, True, True]
+
+        def boom(*_a):
+            calls.append(1)
+            raise OSError("ddc failed")
+
+        with patch.object(ks, "load_config", return_value=ks.Config(devices=[("1234:abcd", "Dev")])), \
+             patch.object(ks, "devices_present", side_effect=sequence), \
+             patch.object(ks, "switch_monitor", side_effect=boom), \
+             patch.object(ks, "time", **{"sleep": lambda _s: None}), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(StopIteration):
+                ks._watch_loop()
+        self.assertEqual(len(calls), 1, "switch retried while the device stayed present")
+
+    def test_second_watcher_refuses_to_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "watcher.pid"
+            pid_file.write_text("4242\n", encoding="utf-8")
+            with patch.object(ks, "watcher_pid_path", return_value=pid_file), \
+                 patch.object(ks, "process_alive", return_value=True), \
+                 patch.object(ks, "ensure_config"), \
+                 patch.object(ks, "maybe_install"), \
+                 patch.object(ks, "os") as fake_os:
+                fake_os.getpid.return_value = 999
+                with self.assertRaises(SystemExit) as caught:
+                    ks.watch()
+            self.assertIn("already running", str(caught.exception))
 
 
 class UpdateTests(unittest.TestCase):

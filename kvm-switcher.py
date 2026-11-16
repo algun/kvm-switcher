@@ -30,7 +30,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 INTERVAL = 0.5
 VCP_INPUT = 0x60
 DEV_RE = re.compile(r"^([0-9a-fA-F]{4}):([0-9a-fA-F]{4})\b\s*(?:#\s*(.*))?$")
@@ -1082,6 +1082,14 @@ def _switch_windows(value: int, name: str = "") -> int:
 def watch() -> None:
     ensure_config()
     maybe_install()
+    # Two watchers would both switch on the same detection, which looks like a
+    # double flash. Refuse to start when one is already running this install.
+    existing = read_watcher_pid()
+    if existing and existing != os.getpid() and process_alive(existing):
+        raise SystemExit(
+            f"A watcher is already running (pid {existing}). "
+            "Stop it first: kvm-switcher.py uninstall"
+        )
     write_watcher_pid(os.getpid())
     try:
         _watch_loop()
@@ -1106,9 +1114,14 @@ def _watch_loop() -> None:
             detected = False
         if detected:
             if not active:
-                print("USB device detected — switching display")
-                switch_monitor()
+                # Set before switching: a failed switch must not leave the flag
+                # False, or every poll would retry and flash the screen again.
                 active = True
+                print("USB device detected — switching display")
+                try:
+                    switch_monitor()
+                except (OSError, subprocess.SubprocessError) as exc:
+                    print(f"Switch failed: {exc}", file=sys.stderr)
         else:
             active = False
         time.sleep(INTERVAL)
