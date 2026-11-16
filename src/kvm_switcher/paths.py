@@ -49,3 +49,16 @@ def config_destination(path: Path) -> Path:
     if path.suffix.lower() == ".txt":
         return path.with_name("config.json")
     return path
+
+
+def launcher_path() -> Path:
+    """The command this installer put on PATH, which `--purge` removes.
+
+    Mirrors where `install.sh` and `install.ps1` write their launcher: a shell
+    script in `~/.local/bin` on Unix, a `.cmd` shim in `%USERPROFILE%\\bin` on
+    Windows. A checkout has no launcher, and removing a missing file is a no-op.
+    """
+    if platform_key() == "windows":
+        base = Path(os.environ.get("USERPROFILE", Path.home()))
+        return base / "bin" / "kvm-switcher.cmd"
+    return Path.home() / ".local" / "bin" / "kvm-switcher"

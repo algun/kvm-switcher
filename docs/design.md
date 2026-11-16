@@ -100,6 +100,30 @@ The cost is that `__file__` is useless inside an archive: it points at
 question of the form "where am I installed?" therefore goes through
 `install_root.py`, which recovers the archive path itself.
 
+## What `uninstall` removes
+
+`uninstall` always deregisters the login entry and stops the watcher. Beyond
+that it asks, because the two remaining pieces have different costs to the user:
+
+| Piece | Where | Cost of losing it |
+| --- | --- | --- |
+| Settings | `config.json`, `watcher.pid` beside it | re-pick devices and monitor input |
+| Program | the `.pyz` in the install directory, plus the launcher on `PATH` | re-run the installer |
+
+`--keep-settings` removes only the login entry; `--purge` removes everything
+without prompting. Without a terminal (a script, or piped input) the questions
+default to keeping both, so a non-interactive run can never block or surprise.
+
+Removal order is deliberate: login entry, then settings, then the launcher, then
+the program directory last. On Windows a running `.pyz` *can* delete its own
+archive and directory, but only while nothing needs importing afterwards, so the
+destructive step comes last and nothing follows it.
+
+Two guards keep `--purge` from destroying the wrong thing. A source checkout is
+refused outright, because there the install *is* the working tree. And the
+launcher is only deleted when it actually points at this installation, so running
+a copy from somewhere else cannot uninstall the real one.
+
 ## Config file format
 
 `configure` writes JSON to `~/.config/kvm-switcher/config.json`

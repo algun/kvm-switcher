@@ -135,7 +135,7 @@ kvm-switcher                 watch in this window; offers to install at login
 kvm-switcher configure       pick devices, the monitor, and its input
 kvm-switcher status          show saved choices and whether the watcher is running
 kvm-switcher install         run at login
-kvm-switcher uninstall       stop it and remove the login entry
+kvm-switcher uninstall       stop it, then ask what else to remove
 kvm-switcher switch [code]   switch once, or use the saved input
 kvm-switcher check           report whether a newer version is published
 kvm-switcher update          replace this program with the published version
@@ -143,8 +143,14 @@ kvm-switcher version         print the version
 ```
 
 `update` downloads the published program, verifies it, and says plainly whether
-the new version is live now or takes effect on the next launch. `uninstall`
-leaves `config.json` alone. [docs/design.md](docs/design.md) explains the rest.
+the new version is live now or takes effect on the next launch.
+
+`uninstall` always removes the login entry and stops the watcher, then asks two
+questions: whether to remove your saved settings (devices and monitor input),
+and whether to remove the program itself. Answering no keeps them, so you can
+reinstall without picking your devices again. For scripted use, `--keep-settings`
+removes only the login entry and `--purge` removes everything without asking.
+[docs/design.md](docs/design.md) explains the rest.
 
 ## When something goes wrong
 

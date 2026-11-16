@@ -7,7 +7,8 @@ One program for Linux, macOS, and Windows. Settings live in
   kvm-switcher configure       pick devices, the monitor, and its input
   kvm-switcher status          show saved choices and whether the watcher is running
   kvm-switcher install         run at login
-  kvm-switcher uninstall       stop it and remove the login entry
+  kvm-switcher uninstall        stop the login entry, and ask what else to remove
+  kvm-switcher uninstall --purge  remove the login entry, the settings, and the program
   kvm-switcher switch [code]   switch once, or use the saved input
   kvm-switcher check           report whether a newer version is published
   kvm-switcher update          replace this program with the published version
@@ -19,7 +20,7 @@ from __future__ import annotations
 import sys
 from typing import List, Optional
 
-from kvm_switcher import __version__, install_root, paths, service
+from kvm_switcher import __version__, install_root, paths, purge, service
 from kvm_switcher.config import (
     DisplayTarget,
     load_config,
@@ -201,14 +202,74 @@ def install() -> None:
     print("Remove it with: kvm-switcher uninstall")
 
 
-def uninstall() -> None:
-    """Stop the login watcher and delete its service entry. The device list stays."""
+def ask_yes_no(question: str, default: bool = False) -> bool:
+    """A y/N prompt, defaulting when the answer is empty.
+
+    Only asked when both streams are a terminal; a piped or scripted run gets
+    the default so it can never block waiting for input that will not come.
+    """
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return default
+    suffix = " [Y/n] " if default else " [y/N] "
+    answer = input(question + suffix).strip().lower()
+    if not answer:
+        return default
+    return answer.startswith("y")
+
+
+def uninstall(argv: Optional[List[str]] = None) -> None:
+    """Stop the login watcher and remove its service entry.
+
+    Then asks what else to remove. Settings are the saved devices and monitor
+    input; the program is the installed archive and the launcher on PATH. Both
+    are separate questions because losing settings means re-picking hardware,
+    while losing the program just means re-running the installer.
+    """
+    args = list(argv or [])
+    keep_settings = "--keep-settings" in args
+    purge_all = "--purge" in args
+
     removed = service.uninstall()
     if removed:
         print("Watcher removed. It will not start at login.")
     else:
         print("No watcher was installed.")
-    print("Config kept at {}".format(paths.config_path()))
+
+    if keep_settings:
+        print("Config kept at {}".format(paths.config_path()))
+        return
+
+    if purge_all:
+        drop_settings = True
+        drop_program = True
+    else:
+        drop_settings = ask_yes_no("Remove your saved settings too?")
+        drop_program = ask_yes_no("Remove the program itself too?")
+
+    if drop_settings:
+        removed_paths, failed = purge.remove_settings()
+        for path in removed_paths:
+            print("Removed {}".format(path))
+        for path in failed:
+            print("Could not remove {}".format(path), file=sys.stderr)
+    else:
+        print("Config kept at {}".format(paths.config_path()))
+
+    if drop_program:
+        if install_root.running_from_checkout():
+            print(
+                "This is a source checkout, so the program files are left alone; "
+                "use git to remove them.",
+                file=sys.stderr,
+            )
+        else:
+            removed_paths, failed = purge.remove_program()
+            for path in removed_paths:
+                print("Removed {}".format(path))
+            for path in failed:
+                print("Could not remove {}".format(path), file=sys.stderr)
+    elif drop_settings:
+        print("Program kept. Remove it later with: kvm-switcher uninstall --purge")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -223,7 +284,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     elif command in ("install", "--install"):
         install()
     elif command in ("uninstall", "--uninstall", "remove", "--remove"):
-        uninstall()
+        uninstall(argv[2:])
     elif command == "switch":
         from kvm_switcher.displays import switch_monitor
 

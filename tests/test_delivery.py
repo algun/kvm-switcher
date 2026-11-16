@@ -368,7 +368,11 @@ def test_the_built_zipapp_runs_and_reports_its_version():
         [sys.executable, str(DIST), "version"], text=True, capture_output=True, timeout=120
     )
     assert completed.returncode == 0, completed.stderr
-    assert completed.stdout.strip() == __version__
+    reported = completed.stdout.strip()
+    assert reported == __version__, (
+        "dist/kvm-switcher.pyz reports {} but the source is {}. The artifact is stale: "
+        "rebuild with `python build.py` before running the tests.".format(reported, __version__)
+    )
 
 
 @pytest.mark.skipif(not DIST.is_file(), reason="dist/kvm-switcher.pyz not built")
