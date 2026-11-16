@@ -7,6 +7,7 @@ launchd, schtasks) stay manual. See README.
 from __future__ import annotations
 
 import importlib.util
+import shutil
 import subprocess
 import sys
 import unittest
@@ -137,6 +138,22 @@ class DeviceListingTests(unittest.TestCase):
         output = "1234:abcd\tUSB Receiver\nnot-a-device\n1234:abcd\tagain\n"
         self.assertEqual(ks.parse_windows_devices(output), [("1234:abcd", "USB Receiver")])
 
+    def test_windows_parses_literal_backtick_t(self):
+        # Regression: PowerShell only expands `t inside a double-quoted format
+        # string. A single-quoted one emits backtick+t literally, and requiring a
+        # real tab there made every device parse away, so the watcher never fired.
+        output = "1234:abcd`tUSB Receiver\n5678:ef01`tKeyboard\n"
+        self.assertEqual(
+            ks.parse_windows_devices(output),
+            [("1234:abcd", "USB Receiver"), ("5678:ef01", "Keyboard")],
+        )
+
+    def test_windows_script_format_string_is_double_quoted(self):
+        script = ks.windows_device_script()
+        self.assertIn("\"{0}:{1}`t{2}\"", script)
+        # A leading single quote would suppress the escape again.
+        self.assertNotIn("'{0}:{1}", script)
+
 
 class DisplayDiscoveryTests(unittest.TestCase):
     def test_detect_skips_invalid_and_reads_model(self):
@@ -176,6 +193,57 @@ Display 1
         self.assertTrue(ks.monitor_matches("MSI Monitor", "Monitor"))
         self.assertFalse(ks.monitor_matches("DELL U2720Q", "Monitor"))
         self.assertTrue(ks.monitor_matches("anything", ""))
+
+    def test_windows_generic_monitor_still_matches(self):
+        # Regression: Windows reports many panels as "Generic PnP Monitor", so a
+        # saved real model name never matched and switch exited with no monitor.
+        self.assertTrue(ks.windows_monitor_matches("Generic PnP Monitor", "MEG 342C OLED"))
+        self.assertTrue(ks.windows_monitor_matches("MEG 342C OLED", "MEG 342C OLED"))
+        # A genuinely different, identifiable monitor must still be skipped.
+        self.assertFalse(ks.windows_monitor_matches("DELL U2720Q", "MEG 342C OLED"))
+        self.assertTrue(ks.windows_monitor_matches("DELL U2720Q", ""))
+
+
+class WatcherProcessTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.pid_file = Path(self._tmp.name) / "watcher.pid"
+
+    def test_pid_file_roundtrip(self):
+        with patch.object(ks, "watcher_pid_path", return_value=self.pid_file):
+            ks.write_watcher_pid(4321)
+            self.assertEqual(ks.read_watcher_pid(), 4321)
+
+    def test_missing_or_junk_pid_file_is_none(self):
+        with patch.object(ks, "watcher_pid_path", return_value=self.pid_file):
+            self.assertIsNone(ks.read_watcher_pid())
+            self.pid_file.write_text("not-a-number", encoding="utf-8")
+            self.assertIsNone(ks.read_watcher_pid())
+
+    def test_dead_process_is_not_alive(self):
+        # A pid that cannot be running: the file is removed, so OpenProcess fails.
+        self.assertFalse(ks.process_alive(0))
+        self.assertFalse(ks.process_alive(-1))
+
+    def test_stop_clears_stale_pid_file(self):
+        # Regression: uninstall claimed success while the watcher kept running.
+        with patch.object(ks, "watcher_pid_path", return_value=self.pid_file):
+            ks.write_watcher_pid(999999)
+            self.assertFalse(ks.stop_watcher_process())
+            self.assertFalse(self.pid_file.exists())
+
+    def test_stop_refuses_a_recycled_pid(self):
+        # A pid file left behind by a crash must not let uninstall kill whatever
+        # unrelated process later inherits that pid.
+        import subprocess as sp
+        victim = sp.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.addCleanup(lambda: (victim.kill(), victim.wait()))
+        self.pid_file.write_text(f"{victim.pid}\nnot-our-start-time\n", encoding="utf-8")
+        with patch.object(ks, "watcher_pid_path", return_value=self.pid_file):
+            self.assertFalse(ks.stop_watcher_process())
+        self.assertIsNone(victim.poll(), "an unrelated process was killed")
 
 
 class SwitchCommandTests(unittest.TestCase):
@@ -261,6 +329,7 @@ class CliTests(unittest.TestCase):
 
 
 class ShellSyntaxTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("bash"), "bash is not installed")
     def test_bash_scripts_parse(self):
         scripts = sorted(ROOT.glob("*.sh"))
         self.assertGreaterEqual(len(scripts), 1)

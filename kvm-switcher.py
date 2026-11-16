@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 INTERVAL = 0.5
 VCP_INPUT = 0x60
 DEV_RE = re.compile(r"^([0-9a-fA-F]{4}):([0-9a-fA-F]{4})\b\s*(?:#\s*(.*))?$")
@@ -274,9 +274,12 @@ def parse_windows_devices(output: str) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
     seen: set[str] = set()
     for line in output.splitlines():
-        if "\t" not in line:
+        # PowerShell emits a real tab only from a double-quoted format string.
+        # Older builds passed a single-quoted one, which leaves backtick-t literal.
+        separator = "\t" if "\t" in line else "`t"
+        if separator not in line:
             continue
-        vidpid, name = line.split("\t", 1)
+        vidpid, name = line.split(separator, 1)
         vidpid = vidpid.strip().lower()
         if not _VIDPID_RE.fullmatch(vidpid) or vidpid in seen:
             continue
@@ -285,16 +288,136 @@ def parse_windows_devices(output: str) -> list[tuple[str, str]]:
     return found
 
 
-def _connected_windows() -> list[tuple[str, str]]:
-    script = (
+def windows_device_script() -> str:
+    """PowerShell fallback. The format string must stay double-quoted: PowerShell
+    only expands `t inside double quotes, and the parser needs a real tab."""
+    return (
         "Get-PnpDevice -PresentOnly | Where-Object { "
         "$_.InstanceId -match '^USB\\\\VID_' -and $_.InstanceId -notmatch '&MI_' } | "
         "ForEach-Object { if ($_.InstanceId -match 'VID_([0-9A-F]{4})&PID_([0-9A-F]{4})') { "
-        "'{0}:{1}`t{2}' -f $Matches[1].ToLower(), $Matches[2].ToLower(), $_.FriendlyName } }"
+        "\"{0}:{1}`t{2}\" -f $Matches[1].ToLower(), $Matches[2].ToLower(), $_.FriendlyName } }"
     )
+
+
+class _GUID(ctypes.Structure):
+    _fields_ = [
+        ("Data1", ctypes.c_ulong),
+        ("Data2", ctypes.c_ushort),
+        ("Data3", ctypes.c_ushort),
+        ("Data4", ctypes.c_ubyte * 8),
+    ]
+
+
+class _SP_DEVINFO_DATA(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_ulong),
+        ("ClassGuid", _GUID),
+        ("DevInst", ctypes.c_ulong),
+        ("Reserved", ctypes.c_void_p),
+    ]
+
+
+_DIGCF_PRESENT = 0x02
+_DIGCF_ALLCLASSES = 0x04
+_SPDRP_DEVICEDESC = 0x00
+_SPDRP_HARDWAREID = 0x01
+_SPDRP_FRIENDLYNAME = 0x0C
+_WINDOWS_HWID_RE = re.compile(r"VID_([0-9A-F]{4})&PID_([0-9A-F]{4})", re.I)
+
+
+def _registry_property(setupapi, devinfo, data, prop: int) -> str:
+    buffer = ctypes.create_unicode_buffer(512)
+    needed = ctypes.c_ulong()
+    ok = setupapi.SetupDiGetDeviceRegistryPropertyW(
+        devinfo, ctypes.byref(data), prop, None, buffer, ctypes.sizeof(buffer), ctypes.byref(needed)
+    )
+    if not ok:
+        return ""
+    # The buffer holds a REG_MULTI_SZ for hardware ids; the first entry is enough.
+    return buffer.value.split("\x00", 1)[0] if buffer.value else ""
+
+
+def _windows_devices_setupapi() -> list[tuple[str, str]] | None:
+    """Present USB devices read in-process, so one poll costs microseconds.
+
+    None means SetupAPI was unusable and the caller should fall back to PowerShell.
+    """
+    try:
+        setupapi = ctypes.WinDLL("setupapi", use_last_error=True)
+    except OSError:
+        return None
+    setupapi.SetupDiGetClassDevsW.restype = ctypes.c_void_p
+    setupapi.SetupDiGetClassDevsW.argtypes = [
+        ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_void_p, ctypes.c_ulong
+    ]
+    setupapi.SetupDiEnumDeviceInfo.restype = ctypes.c_bool
+    setupapi.SetupDiEnumDeviceInfo.argtypes = [
+        ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(_SP_DEVINFO_DATA)
+    ]
+    setupapi.SetupDiGetDeviceRegistryPropertyW.restype = ctypes.c_bool
+    setupapi.SetupDiGetDeviceRegistryPropertyW.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(_SP_DEVINFO_DATA),
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong),
+    ]
+    setupapi.SetupDiDestroyDeviceInfoList.restype = ctypes.c_bool
+    setupapi.SetupDiDestroyDeviceInfoList.argtypes = [ctypes.c_void_p]
+
+    devinfo = setupapi.SetupDiGetClassDevsW(
+        None, None, None, _DIGCF_PRESENT | _DIGCF_ALLCLASSES
+    )
+    if not devinfo or devinfo == ctypes.c_void_p(-1).value:
+        return None
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    try:
+        index = 0
+        while True:
+            data = _SP_DEVINFO_DATA()
+            data.cbSize = ctypes.sizeof(_SP_DEVINFO_DATA)
+            if not setupapi.SetupDiEnumDeviceInfo(devinfo, index, ctypes.byref(data)):
+                break
+            index += 1
+            hardware = _registry_property(setupapi, devinfo, data, _SPDRP_HARDWAREID)
+            # Same scope as the PowerShell query: USB devices only, and
+            # &MI_ marks one interface of a composite device, not the device itself.
+            if not hardware.upper().startswith("USB\\VID_"):
+                continue
+            if "&MI_" in hardware.upper():
+                continue
+            match = _WINDOWS_HWID_RE.search(hardware)
+            if not match:
+                continue
+            vidpid = f"{match.group(1)}:{match.group(2)}".lower()
+            if vidpid in seen:
+                continue
+            seen.add(vidpid)
+            name = (
+                _registry_property(setupapi, devinfo, data, _SPDRP_FRIENDLYNAME)
+                or _registry_property(setupapi, devinfo, data, _SPDRP_DEVICEDESC)
+                or vidpid
+            )
+            found.append((vidpid, name))
+    finally:
+        setupapi.SetupDiDestroyDeviceInfoList(devinfo)
+    return found
+
+
+def _connected_windows() -> list[tuple[str, str]]:
+    if platform_key() == "windows":
+        try:
+            direct = _windows_devices_setupapi()
+        except (OSError, AttributeError):
+            direct = None
+        if direct is not None:
+            return direct
     try:
         output = subprocess.check_output(
-            ["powershell", "-NoProfile", "-Command", script],
+            ["powershell", "-NoProfile", "-Command", windows_device_script()],
             text=True,
             stderr=subprocess.DEVNULL,
         )
@@ -627,6 +750,17 @@ def switch_monitor(input_text: str | None = None) -> int:
     return 1
 
 
+# Windows reports many panels as a placeholder instead of the real model name,
+# so a monitor friendly name saved from another OS can never match.
+_WINDOWS_GENERIC_DESCRIPTIONS = frozenset({"generic pnp monitor", "generic monitor", "pnp monitor"})
+
+
+def windows_monitor_matches(description: str, wanted: str) -> bool:
+    if monitor_matches(description, wanted):
+        return True
+    return description.strip().casefold() in _WINDOWS_GENERIC_DESCRIPTIONS
+
+
 def _switch_windows(value: int, name: str = "") -> int:
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     dxva2 = ctypes.WinDLL("dxva2", use_last_error=True)
@@ -648,7 +782,7 @@ def _switch_windows(value: int, name: str = "") -> int:
     callback_type = ctypes.WINFUNCTYPE(
         ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(RECT), ctypes.c_ssize_t
     )
-    switched = {"n": 0}
+    collected: list[tuple[str, ctypes.c_void_p, object, ctypes.c_uint]] = []
 
     def _callback(hmonitor, _hdc, _rect, _data):
         count = ctypes.c_uint()
@@ -659,24 +793,49 @@ def _switch_windows(value: int, name: str = "") -> int:
         monitors = (PHYSICAL_MONITOR * count.value)()
         if not dxva2.GetPhysicalMonitorsFromHMONITOR(hmonitor, count, monitors):
             return 1
-        try:
-            for monitor in monitors:
-                if not monitor_matches(monitor.description, name):
-                    continue
-                if dxva2.SetVCPFeature(monitor.handle, VCP_INPUT, value):
-                    switched["n"] += 1
-        finally:
-            dxva2.DestroyPhysicalMonitors(count, monitors)
+        for monitor in monitors:
+            collected.append((monitor.description, monitor.handle, monitors, count))
         return 1
 
     callback = callback_type(_callback)
     user32.EnumDisplayMonitors(None, None, callback, 0)
-    return switched["n"]
+    # One DestroyPhysicalMonitors call covers the array every entry shares.
+    destroyed: set[int] = set()
+    try:
+        switched = 0
+        for description, handle, _array, _count in collected:
+            if not windows_monitor_matches(description, name):
+                continue
+            if dxva2.SetVCPFeature(handle, VCP_INPUT, value):
+                switched += 1
+        return switched
+    finally:
+        for _description, _handle, array, count in collected:
+            key = id(array)
+            if key in destroyed:
+                continue
+            destroyed.add(key)
+            dxva2.DestroyPhysicalMonitors(count, array)
 
 
 def watch() -> None:
     ensure_config()
     maybe_install()
+    write_watcher_pid(os.getpid())
+    try:
+        _watch_loop()
+    finally:
+        # Only clear the record if it still identifies this exact process.
+        if read_watcher_pid() == os.getpid():
+            recorded = _read_watcher_start()
+            if not recorded or _pid_start_time(os.getpid()) == recorded:
+                try:
+                    watcher_pid_path().unlink()
+                except OSError:
+                    pass
+
+
+def _watch_loop() -> None:
     active = False
     while True:
         wanted = [vidpid for vidpid, _ in load_config(config_path()).devices]
@@ -752,6 +911,124 @@ def parse_schtasks_status(text: str) -> bool:
     return False
 
 
+def watcher_pid_path() -> Path:
+    return config_path().with_name("watcher.pid")
+
+
+def _pid_start_time(pid: int) -> str:
+    """Creation time of a live process, so a recycled pid is not mistaken for ours."""
+    if sys.platform == "win32":
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return ""
+        try:
+            creation = ctypes.c_ulonglong()
+            exit_time = ctypes.c_ulonglong()
+            kernel = ctypes.c_ulonglong()
+            user = ctypes.c_ulonglong()
+            ok = kernel32.GetProcessTimes(
+                ctypes.c_void_p(handle),
+                ctypes.byref(creation),
+                ctypes.byref(exit_time),
+                ctypes.byref(kernel),
+                ctypes.byref(user),
+            )
+            return str(creation.value) if ok else ""
+        finally:
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        return stat.split(") ", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return ""
+
+
+def write_watcher_pid(pid: int) -> None:
+    start = _pid_start_time(pid)
+    try:
+        path = watcher_pid_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{pid}\n{start}\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def read_watcher_pid() -> int | None:
+    try:
+        first = watcher_pid_path().read_text(encoding="utf-8").strip().splitlines()[0]
+        return int(first)
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _read_watcher_start() -> str:
+    try:
+        lines = watcher_pid_path().read_text(encoding="utf-8").strip().splitlines()
+        return lines[1].strip() if len(lines) > 1 else ""
+    except OSError:
+        return ""
+
+
+def process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code)):
+                return False
+            return code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def stop_watcher_process() -> bool:
+    """Stop a watcher this user started, but never an unrelated process that
+    happens to have inherited its pid after the watcher exited."""
+    pid = read_watcher_pid()
+    recorded = _read_watcher_start()
+    stopped = False
+    try:
+        if pid and process_alive(pid) and (not recorded or _pid_start_time(pid) == recorded):
+            if sys.platform == "win32":
+                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                PROCESS_TERMINATE = 0x0001
+                kernel32.OpenProcess.restype = ctypes.c_void_p
+                handle = kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
+                if handle:
+                    try:
+                        stopped = bool(kernel32.TerminateProcess(ctypes.c_void_p(handle), 1))
+                    finally:
+                        kernel32.CloseHandle(ctypes.c_void_p(handle))
+            else:
+                try:
+                    os.kill(pid, 15)
+                    stopped = True
+                except OSError:
+                    stopped = False
+    finally:
+        try:
+            watcher_pid_path().unlink()
+        except OSError:
+            pass
+    return stopped
+
+
 def service_running() -> bool:
     key = platform_key()
     if key == "linux":
@@ -777,7 +1054,10 @@ def service_running() -> bool:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
-        return parse_schtasks_status(result.stdout)
+        if parse_schtasks_status(result.stdout):
+            return True
+        pid = read_watcher_pid()
+        return bool(pid and process_alive(pid))
     return False
 
 
@@ -886,10 +1166,18 @@ def install() -> None:
             ["schtasks", "/Create", "/F", "/SC", "ONLOGON", "/RL", "LIMITED", "/TN", "kvm-switcher", "/TR", command],
         )
         if created.returncode != 0:
+            # A Scheduled Task needs elevation on some machines. The per-user
+            # Run key does not, so it is the fallback rather than a failure.
+            print(
+                "Scheduled Task could not be created "
+                f"(schtasks exit {created.returncode}); using the per-user Run key instead.",
+                file=sys.stderr,
+            )
             import winreg
             with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as run_key:
                 winreg.SetValueEx(run_key, "kvm-switcher", 0, winreg.REG_SZ, command)
-        subprocess.Popen([python, str(target)], close_fds=True)
+        child = subprocess.Popen([python, str(target)], close_fds=True)
+        write_watcher_pid(child.pid)
     else:
         raise SystemExit(f"No service install for {key}")
     print("Installation complete. The watcher is running in the background.")
@@ -917,9 +1205,14 @@ def uninstall() -> None:
             plist.unlink()
             removed = True
     elif key == "windows":
+        # schtasks may not own the entry at all (the Run-key fallback does), so
+        # report success only for something that really changed.
+        stopped = stop_watcher_process()
         ended = subprocess.run(["schtasks", "/End", "/TN", "kvm-switcher"], check=False)
         deleted = subprocess.run(["schtasks", "/Delete", "/F", "/TN", "kvm-switcher"], check=False)
         if ended.returncode == 0 or deleted.returncode == 0:
+            removed = True
+        if stopped:
             removed = True
         try:
             import winreg

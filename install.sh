@@ -4,6 +4,7 @@
 set -euo pipefail
 
 repo="algun/kvm-switcher"
+ref="main"
 dest="${HOME}/.local/share/kvm-switcher"
 bindir="${HOME}/.local/bin"
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -11,11 +12,15 @@ here="$(cd "$(dirname "$0")" && pwd)"
 if [[ -f "${here}/kvm-switcher.py" ]]; then
   src="$here"
 else
+  # Piped from a URL, so there is no checkout to copy from. Keep $ref in step
+  # with install.ps1 so both one-liners install the same code.
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
-  curl -fsSL -L "https://github.com/${repo}/releases/latest/download/kvm-switcher.tar.gz" \
-    -o "${tmp}/kvm-switcher.tar.gz"
-  tar -C "$tmp" -xzf "${tmp}/kvm-switcher.tar.gz"
+  mkdir -p "${tmp}/kvm-switcher"
+  for name in kvm-switcher.py config.json; do
+    curl -fsSL -L "https://raw.githubusercontent.com/${repo}/${ref}/${name}" \
+      -o "${tmp}/kvm-switcher/${name}"
+  done
   src="${tmp}/kvm-switcher"
 fi
 

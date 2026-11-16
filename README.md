@@ -16,7 +16,7 @@ Python 3 is the only language runtime. The program uses the standard library, so
 | --- | --- |
 | Linux | `ddcutil` (switch the monitor), `lsusb` from `usbutils` (list USB devices), systemd (login service) |
 | macOS | [BetterDisplay](https://github.com/waydabber/BetterDisplay) and its [`betterdisplaycli`](https://github.com/waydabber/betterdisplaycli) (switch the monitor). USB listing uses `ioreg`, which is already installed |
-| Windows | Nothing else. Display switching uses the Windows API, and USB listing uses PowerShell |
+| Windows | Nothing else. Display switching uses the Windows API, and USB listing uses `setupapi` through ctypes (falling back to PowerShell) |
 
 On macOS, install the CLI with `brew install waydabber/betterdisplay/betterdisplaycli`. BetterDisplay has to be running, and CLI access has to be on (that is the default). This program sends a direct DDC input-select command. [BetterDisplay lists DDC input switching as free](https://github.com/waydabber/BetterDisplay/wiki/List-of-free-and-Pro-features) for personal use after the 14-day Pro trial. Other CLI features are Pro. A business using the app needs a Pro license even for the free features.
 
@@ -32,28 +32,30 @@ From a checkout:
 .\install.ps1
 ```
 
-Without a checkout, the same scripts download the latest GitHub release. On Linux or macOS:
+Without a checkout, the same scripts run from a URL and download the program from the `main` branch. On Linux or macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/algun/kvm-switcher/v0.1.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/algun/kvm-switcher/main/install.sh | bash
 ```
 
 On Windows:
 
 ```powershell
-irm https://raw.githubusercontent.com/algun/kvm-switcher/v0.1.0/install.ps1 | iex
+irm https://raw.githubusercontent.com/algun/kvm-switcher/main/install.ps1 | iex
 ```
+
+A piped run has no checkout beside it, so it fetches `kvm-switcher.py` and `config.json` from the `main` branch (the `$ref` line in `install.ps1` and `install.sh`). That means whatever is on `main` reaches users, tests or not. For a reproducible install, pin the URL to a tag such as `v0.1.1` and set `$ref` accordingly.
 
 That puts `kvm-switcher` on `PATH` (`~/.local/bin` on Linux and macOS, `%USERPROFILE%\bin\kvm-switcher.cmd` on Windows). It does not start the login watcher. Run `kvm-switcher configure`, then `kvm-switcher install` if you want it at login.
 
 To publish a release, bump `VERSION` in `kvm-switcher.py`, commit, and push a matching tag:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
-The tag must be `v` plus `VERSION`. The release workflow runs the tests and attaches `kvm-switcher.tar.gz` and `kvm-switcher.zip`.
+The tag must be `v` plus `VERSION`, and it must be a new tag: pushing a commit does not move an existing one. The release workflow runs the tests and attaches `kvm-switcher.tar.gz` and `kvm-switcher.zip`.
 
 ## Quick start
 
@@ -66,6 +68,10 @@ python3 kvm-switcher.py             # watch in this window; asks to install at l
 On Windows, run `python kvm-switcher.py` with the same commands.
 
 `install` copies the program to `~/bin` and starts it at login (a systemd user service, a launchd agent, or a scheduled task). `uninstall` removes that entry and leaves `config.json` in place.
+
+On Windows the watcher runs as a Scheduled Task. If the task cannot be created (some machines require elevation for `schtasks`), `install` says so and falls back to a per-user `Run` registry entry instead. Either way the watcher writes `%APPDATA%\kvm-switcher\watcher.pid`, which is how `status` and `uninstall` find the running process.
+
+Because Windows reports most panels as `Generic PnP Monitor` rather than their real model name, a saved monitor name that does not match still matches a generic description. A monitor with a distinct name is never switched.
 
 ## Commands
 
@@ -103,3 +109,9 @@ Check by hand when you change login install or the actual display switch:
 - `kvm-switcher.py switch` moves the monitor to the saved input
 - plugging a selected device switches once, and unplugging arms it again
 - `install` / `uninstall` register and remove the login entry (systemd user service, launchd agent, or Scheduled Task)
+
+On Windows, also confirm:
+
+- `configure` lists USB devices (it exits with `No USB devices found.` if the device scan is broken)
+- `switch` prints `Switched 1 monitor(s)` rather than `No monitor accepted input select.`
+- `status` says `Watcher: running` while the watcher is up, and `uninstall` leaves no `python.exe ... kvm-switcher.py` behind
