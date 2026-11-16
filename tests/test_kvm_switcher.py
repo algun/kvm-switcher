@@ -192,11 +192,11 @@ Display 1
 
     def test_capabilities_and_mccs(self):
         caps = """
-   Feature: 60 (Input Source)
+  Feature: 60 (Input Source)
       Values:
          0f: DisplayPort-1
          11: HDMI-1
-   Feature: 62 (Audio)
+  Feature: 62 (Audio)
 """
         self.assertEqual(
             ks.parse_input_sources(caps),
@@ -204,8 +204,35 @@ Display 1
         )
         self.assertEqual(
             ks.parse_input_sources("vcp(10 60(0F 12) )"),
-            [("0x0f", ""), ("0x12", "")],
+            [("0x0f", "DisplayPort-1"), ("0x12", "HDMI-2")],
         )
+
+    def test_windows_capability_string_gives_labelled_inputs(self):
+        # The exact shape a monitor returns through DXVA2 capabilities.
+        caps = (
+            "(prot(monitor)type(lcd)model(FALCON)cmds(01 02 03 07 0C 4E F3 E3)"
+            "vcp(02 04 05 08 0B 0C 10 12 60(11 12 0F 10) 62 8D FF)mswhql(1)mccs_ver(2.0))"
+        )
+        self.assertEqual(
+            ks.parse_mccs_inputs(caps),
+            [
+                ("0x11", "HDMI-1"),
+                ("0x12", "HDMI-2"),
+                ("0x0f", "DisplayPort-1"),
+                ("0x10", "DisplayPort-2"),
+            ],
+        )
+
+    def test_unknown_input_code_still_listed(self):
+        # A monitor may advertise a value the table does not know; keep the code
+        # rather than dropping the choice.
+        self.assertEqual(ks.parse_mccs_inputs("vcp(60(11 7a))"), [("0x11", "HDMI-1"), ("0x7a", "")])
+
+    def test_input_labels(self):
+        self.assertEqual(ks.input_label("0x0f"), "DisplayPort-1")
+        self.assertEqual(ks.input_label("0F"), "DisplayPort-1")
+        self.assertEqual(ks.input_label("12"), "HDMI-2")
+        self.assertEqual(ks.input_label("0x99"), "")
 
     def test_monitor_name_match(self):
         self.assertTrue(ks.monitor_matches("MSI Monitor", "Monitor"))
@@ -220,6 +247,51 @@ Display 1
         # A genuinely different, identifiable monitor must still be skipped.
         self.assertFalse(ks.windows_monitor_matches("DELL U2720Q", "MEG 342C OLED"))
         self.assertTrue(ks.windows_monitor_matches("DELL U2720Q", ""))
+
+
+class WindowsSwitchTargetTests(unittest.TestCase):
+    """The generic-name fallback must not switch monitors it cannot identify."""
+
+    class _FakeDxva2:
+        def __init__(self, ok=True):
+            self.written = []
+            self._ok = ok
+
+        def SetVCPFeature(self, handle, code, value):
+            self.written.append(handle)
+            return self._ok
+
+    def _run(self, descriptions, name, ok=True):
+        dxva2 = self._FakeDxva2(ok)
+        collected = [(d, f"h{i}", None, 1) for i, d in enumerate(descriptions)]
+        with patch.object(ks, "_windows_physical_monitors", return_value=(dxva2, collected)), \
+             patch.object(ks, "_release_windows_monitors"):
+            return ks._switch_windows(0x0F, name), dxva2.written
+
+    def test_single_generic_monitor_is_switched(self):
+        switched, written = self._run(["Generic PnP Monitor"], "MEG 342C OLED")
+        self.assertEqual(switched, 1)
+        self.assertEqual(written, ["h0"])
+
+    def test_two_monitors_with_unmatched_name_switches_nothing(self):
+        # Two displays, neither carrying the saved name: writing to either could
+        # black out the wrong screen, so nothing may be touched.
+        switched, written = self._run(
+            ["Generic PnP Monitor", "Generic PnP Monitor"], "MEG 342C OLED"
+        )
+        self.assertEqual(switched, 0)
+        self.assertEqual(written, [])
+
+    def test_named_match_still_switches_among_several(self):
+        switched, written = self._run(
+            ["DELL U2720Q", "MEG 342C OLED"], "MEG 342C OLED"
+        )
+        self.assertEqual(switched, 1)
+        self.assertEqual(written, ["h1"])
+
+    def test_failed_write_is_not_counted(self):
+        switched, _ = self._run(["Generic PnP Monitor"], "", ok=False)
+        self.assertEqual(switched, 0)
 
 
 class WatcherProcessTests(unittest.TestCase):

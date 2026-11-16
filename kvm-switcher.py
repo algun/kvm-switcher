@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 INTERVAL = 0.5
 VCP_INPUT = 0x60
 DEV_RE = re.compile(r"^([0-9a-fA-F]{4}):([0-9a-fA-F]{4})\b\s*(?:#\s*(.*))?$")
@@ -567,6 +567,39 @@ def parse_ddcutil_detect(output: str) -> list[FoundDisplay]:
     return displays
 
 
+_MCCS_INPUT_NAMES = {
+    "01": "Analog-1",
+    "02": "Analog-2",
+    "03": "Digital-1",
+    "04": "Digital-2",
+    "05": "Composite-1",
+    "06": "Composite-2",
+    "07": "SVideo-1",
+    "08": "SVideo-2",
+    "09": "Tuner-1",
+    "0a": "Tuner-2",
+    "0b": "Tuner-3",
+    "0c": "Component-1",
+    "0d": "Component-2",
+    "0e": "Component-3",
+    "0f": "DisplayPort-1",
+    "10": "DisplayPort-2",
+    "11": "HDMI-1",
+    "12": "HDMI-2",
+    "13": "HDMI-3",
+    "14": "HDMI-4",
+    "15": "DVI-1",
+    "16": "DVI-2",
+    "17": "Thunderbolt-1",
+    "18": "Thunderbolt-2",
+}
+
+
+def input_label(code: str) -> str:
+    """Human name for an MCCS input-select value, or "" when it is not a known one."""
+    return _MCCS_INPUT_NAMES.get(code.strip().lower().removeprefix("0x"), "")
+
+
 def parse_input_sources(output: str) -> list[tuple[str, str]]:
     """Input-select values from `ddcutil capabilities` or an MCCS capability string."""
     sources: list[tuple[str, str]] = []
@@ -593,12 +626,20 @@ def parse_input_sources(output: str) -> list[tuple[str, str]]:
             break
     if sources:
         return sources
+    return parse_mccs_inputs(output)
+
+
+def parse_mccs_inputs(output: str) -> list[tuple[str, str]]:
+    """Input values from an MCCS capability string such as `vcp(... 60(11 12 0F 10) ...)`."""
     mccs = _MCCS_INPUT_RE.search(output)
     if not mccs:
         return []
+    sources: list[tuple[str, str]] = []
     for token in mccs.group(1).split():
-        if re.fullmatch(r"[0-9a-fA-F]{2}", token):
-            sources.append((f"0x{token.lower()}", ""))
+        if not re.fullmatch(r"[0-9a-fA-F]{2}", token):
+            continue
+        code = token.lower()
+        sources.append((f"0x{code}", input_label(code)))
     return sources
 
 
@@ -610,7 +651,13 @@ def _command_output(command: list[str]) -> str:
 
 
 def discover_displays() -> list[FoundDisplay]:
-    if platform_key() != "linux":
+    key = platform_key()
+    if key == "windows":
+        try:
+            return _windows_displays()
+        except (OSError, AttributeError):
+            return []
+    if key != "linux":
         return []
     found = parse_ddcutil_detect(_command_output(["ddcutil", "detect"]))
     for display in found:
@@ -860,27 +907,46 @@ def windows_monitor_matches(description: str, wanted: str) -> bool:
     return description.strip().casefold() in _WINDOWS_GENERIC_DESCRIPTIONS
 
 
-def _switch_windows(value: int, name: str = "") -> int:
+class _RECT(ctypes.Structure):
+    _fields_ = [
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long),
+    ]
+
+
+class _PHYSICAL_MONITOR(ctypes.Structure):
+    _fields_ = [
+        ("handle", ctypes.c_void_p),
+        ("description", ctypes.c_wchar * 128),
+    ]
+
+
+_WINDOWS_MONITOR_CALLBACK = ctypes.WINFUNCTYPE(
+    ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(_RECT), ctypes.c_ssize_t
+)
+
+
+class _PhysicalHandles:
+    """Physical monitor handles that stay valid until the block exits."""
+
+    def __init__(self, dxva2, monitors):
+        self._dxva2 = dxva2
+        self.monitors = monitors
+
+    def __enter__(self):
+        return self.monitors
+
+    def __exit__(self, *_exc):
+        self._dxva2.DestroyPhysicalMonitors(len(self.monitors), self.monitors)
+        return False
+
+
+def _windows_physical_monitors():
+    """(dxva2, [(description, handle)]) for every physical monitor Windows reports."""
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     dxva2 = ctypes.WinDLL("dxva2", use_last_error=True)
-
-    class RECT(ctypes.Structure):
-        _fields_ = [
-            ("left", ctypes.c_long),
-            ("top", ctypes.c_long),
-            ("right", ctypes.c_long),
-            ("bottom", ctypes.c_long),
-        ]
-
-    class PHYSICAL_MONITOR(ctypes.Structure):
-        _fields_ = [
-            ("handle", ctypes.c_void_p),
-            ("description", ctypes.c_wchar * 128),
-        ]
-
-    callback_type = ctypes.WINFUNCTYPE(
-        ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(RECT), ctypes.c_ssize_t
-    )
     collected: list[tuple[str, ctypes.c_void_p, object, ctypes.c_uint]] = []
 
     def _callback(hmonitor, _hdc, _rect, _data):
@@ -889,32 +955,111 @@ def _switch_windows(value: int, name: str = "") -> int:
             return 1
         if count.value == 0:
             return 1
-        monitors = (PHYSICAL_MONITOR * count.value)()
+        monitors = (_PHYSICAL_MONITOR * count.value)()
         if not dxva2.GetPhysicalMonitorsFromHMONITOR(hmonitor, count, monitors):
             return 1
         for monitor in monitors:
             collected.append((monitor.description, monitor.handle, monitors, count))
         return 1
 
-    callback = callback_type(_callback)
+    callback = _WINDOWS_MONITOR_CALLBACK(_callback)
     user32.EnumDisplayMonitors(None, None, callback, 0)
-    # One DestroyPhysicalMonitors call covers the array every entry shares.
+    return dxva2, collected
+
+
+def _release_windows_monitors(dxva2, collected) -> None:
+    """One DestroyPhysicalMonitors call covers the array every entry in it shares."""
     destroyed: set[int] = set()
+    for _description, _handle, array, count in collected:
+        marker = id(array)
+        if marker in destroyed:
+            continue
+        destroyed.add(marker)
+        dxva2.DestroyPhysicalMonitors(count, array)
+
+
+def windows_capabilities(dxva2, handle) -> str:
+    """The MCCS capability string a monitor reports, or "" when it gives none.
+
+    The length from GetCapabilitiesStringLength counts bytes of an ANSI reply, and
+    CapabilitiesRequestAndCapabilitiesReply takes a byte buffer. Handing it a
+    wchar buffer instead makes Windows treat the two-byte characters as the
+    payload and interleave every character into mojibake.
+    """
+    length = ctypes.c_uint()
+    if not dxva2.GetCapabilitiesStringLength(handle, ctypes.byref(length)) or length.value == 0:
+        return ""
+    buffer = ctypes.create_string_buffer(length.value)
+    if not dxva2.CapabilitiesRequestAndCapabilitiesReply(handle, buffer, length.value):
+        return ""
+    return buffer.value.decode("ascii", "replace")
+
+
+def _windows_monitor_model_name() -> str:
+    """Real monitor model from WMI, since DXVA2 only reports "Generic PnP Monitor"."""
     try:
+        output = subprocess.check_output(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance -Namespace root\\wmi -ClassName WmiMonitorID "
+                "-ErrorAction SilentlyContinue | ForEach-Object { "
+                "$n = ($_.UserFriendlyName | Where-Object { $_ -ne 0 } | ForEach-Object {[char]$_}) -join ''; "
+                "if ($n) { $n } }",
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    for line in output.splitlines():
+        name = line.strip()
+        if useful_device_name(name):
+            return name
+    return ""
+
+
+def _windows_displays() -> list[FoundDisplay]:
+    """Windows has no ddcutil, so ask each monitor for its own input list."""
+    dxva2, collected = _windows_physical_monitors()
+    displays: list[FoundDisplay] = []
+    try:
+        for description, handle, _array, _count in collected:
+            display = FoundDisplay(name=description or "Monitor")
+            display.inputs = parse_mccs_inputs(windows_capabilities(dxva2, handle))
+            displays.append(display)
+    finally:
+        _release_windows_monitors(dxva2, collected)
+    # DXVA2 reports every panel as "Generic PnP Monitor"; WMI knows the model, and
+    # the name is only used for display, never for matching a switch target.
+    model = _windows_monitor_model_name()
+    if model:
+        for display in displays:
+            if display.name.strip().casefold() in _WINDOWS_GENERIC_DESCRIPTIONS:
+                display.name = model
+    return displays
+
+
+def _switch_windows(value: int, name: str = "") -> int:
+    dxva2, collected = _windows_physical_monitors()
+    try:
+        # Windows usually reports "Generic PnP Monitor", which cannot be matched
+        # against a real model name. Falling back to a generic monitor is only
+        # safe when there is exactly one: with several, a saved name that matches
+        # nothing would switch unrelated displays.
+        allow_generic = len(collected) == 1
         switched = 0
         for description, handle, _array, _count in collected:
-            if not windows_monitor_matches(description, name):
-                continue
+            if not monitor_matches(description, name):
+                if not (allow_generic and windows_monitor_matches(description, name)):
+                    continue
             if dxva2.SetVCPFeature(handle, VCP_INPUT, value):
                 switched += 1
         return switched
     finally:
-        for _description, _handle, array, count in collected:
-            key = id(array)
-            if key in destroyed:
-                continue
-            destroyed.add(key)
-            dxva2.DestroyPhysicalMonitors(count, array)
+        _release_windows_monitors(dxva2, collected)
 
 
 def watch() -> None:
@@ -944,7 +1089,7 @@ def _watch_loop() -> None:
             detected = False
         if detected:
             if not active:
-                print("USB device detected — switching display")
+                print("USB device detected â€” switching display")
                 switch_monitor()
                 active = True
         else:
