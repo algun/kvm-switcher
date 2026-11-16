@@ -7,6 +7,8 @@ launchd, schtasks) stay manual. See README.
 from __future__ import annotations
 
 import importlib.util
+import contextlib
+import io
 import re
 import shutil
 import subprocess
@@ -467,6 +469,103 @@ class PortabilityTests(unittest.TestCase):
                 if isinstance(sub, ast.Attribute) and sub.attr in {"WinDLL", "WINFUNCTYPE", "windll"}:
                     offenders.append((sub.attr, getattr(sub, "lineno", 0)))
         self.assertEqual(offenders, [], "Windows-only ctypes call at module scope")
+
+
+class UpdateTests(unittest.TestCase):
+    def test_version_comparison(self):
+        cases = [
+            ("0.1.7", "0.1.6", True),
+            ("0.1.6", "0.1.6", False),
+            ("0.1.5", "0.1.6", False),
+            ("v0.2.0", "0.1.9", True),
+            # Numeric, not string, comparison: "10" is newer than "9".
+            ("0.1.10", "0.1.9", True),
+            ("1.0", "0.9.9", True),
+            ("0.1.6.1", "0.1.6", True),
+            ("junk", "0.1.6", False),
+            ("", "0.1.6", False),
+        ]
+        for candidate, current, expected in cases:
+            with self.subTest(candidate=candidate, current=current):
+                self.assertEqual(ks.version_is_newer(candidate, current), expected)
+
+    def test_download_is_rejected_when_not_newer(self):
+        body = b'#!/usr/bin/env python3\nVERSION = "0.0.1"\n'
+        with self.assertRaises(SystemExit) as caught:
+            ks._verified_program(body, "0.1.6")
+        self.assertIn("not newer", str(caught.exception))
+
+    def test_download_is_rejected_when_it_does_not_compile(self):
+        body = b'VERSION = "9.9.9"\ndef broken(:\n'
+        with self.assertRaises(SystemExit) as caught:
+            ks._verified_program(body, "0.1.6")
+        self.assertIn("does not compile", str(caught.exception))
+
+    def test_download_is_rejected_when_it_is_not_the_program(self):
+        with self.assertRaises(SystemExit) as caught:
+            ks._verified_program(b"<html>404</html>", "0.1.6")
+        self.assertIn("not kvm-switcher.py", str(caught.exception))
+
+    def test_download_is_rejected_when_it_has_a_bom(self):
+        # A BOM breaks the shebang that install.sh symlinks onto PATH.
+        body = b'\xef\xbb\xbfVERSION = "9.9.9"\n'
+        with self.assertRaises(SystemExit) as caught:
+            ks._verified_program(body, "0.1.6")
+        self.assertIn("BOM", str(caught.exception))
+
+    def test_good_download_is_accepted(self):
+        body = b'#!/usr/bin/env python3\nVERSION = "9.9.9"\n'
+        self.assertEqual(ks._verified_program(body, "0.1.6"), body)
+
+    def test_checkout_refuses_to_self_update(self):
+        # A git checkout must be updated with git, never overwritten in place.
+        with patch.object(ks, "running_from_checkout", return_value=True), \
+             patch.object(ks, "published_version", return_value="9.9.9"):
+            with self.assertRaises(SystemExit) as caught:
+                ks.update()
+        self.assertIn("git pull", str(caught.exception))
+
+    def test_same_program_matches_quoted_and_absolute_paths(self):
+        target = str(SCRIPT)
+        self.assertTrue(ks.same_program(target, target))
+        self.assertTrue(ks.same_program(f'"{target}"', target))
+        self.assertTrue(ks.same_program(f"python.exe {target}", target))
+        self.assertFalse(ks.same_program("/somewhere/else/kvm-switcher.py", target))
+        self.assertFalse(ks.same_program("", target))
+
+    def test_update_leaves_other_watchers_alone(self):
+        """A copy installed elsewhere must not stop a watcher it does not own."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "kvm-switcher.py"
+            target.write_text('VERSION = "0.1.0"\n', encoding="utf-8")
+            body = b'VERSION = "9.9.9"\n'
+            with patch.object(ks, "running_from_checkout", return_value=False), \
+                 patch.object(ks, "published_version", return_value="9.9.9"), \
+                 patch.object(ks, "_download_program", return_value=body), \
+                 patch.object(ks, "read_watcher_pid", return_value=4242), \
+                 patch.object(ks, "process_alive", return_value=True), \
+                 patch.object(ks, "running_watcher_target", return_value="/other/install/kvm-switcher.py"), \
+                 patch.object(ks, "__file__", str(target)), \
+                 patch.object(ks, "stop_watcher_process") as stop, \
+                 patch.object(ks, "spawn_watcher") as spawn, \
+                 contextlib.redirect_stdout(io.StringIO()):
+                code = ks.update()
+            written = target.read_bytes()
+        self.assertEqual(code, 0)
+        stop.assert_not_called()   # someone else's watcher keeps running
+        spawn.assert_not_called()
+        self.assertIn(b"9.9.9", written)
+
+    def test_watcher_spawn_does_not_inherit_stdio(self):
+        # An inherited pipe made `update` hang when its output was captured.
+        with patch.object(ks.subprocess, "Popen") as popen:
+            popen.return_value.pid = 1234
+            self.assertEqual(ks.spawn_watcher(Path("program.py")), 1234)
+        _args, kwargs = popen.call_args
+        self.assertEqual(kwargs["stdout"], ks.subprocess.DEVNULL)
+        self.assertEqual(kwargs["stderr"], ks.subprocess.DEVNULL)
+        self.assertEqual(kwargs["stdin"], ks.subprocess.DEVNULL)
 
 
 class EncodingTests(unittest.TestCase):

@@ -10,6 +10,8 @@ One program for Linux, macOS, and Windows. Settings live in
   kvm-switcher.py install         run at login
   kvm-switcher.py uninstall       stop it and remove the login entry
   kvm-switcher.py switch [code]  switch once, or use the saved input
+  kvm-switcher.py check           report whether a newer version is published
+  kvm-switcher.py update          replace this program with the published version
   kvm-switcher.py version         print the version
 """
 
@@ -23,10 +25,12 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
-VERSION = "0.1.6"
+VERSION = "0.2.0"
 INTERVAL = 0.5
 VCP_INPUT = 0x60
 DEV_RE = re.compile(r"^([0-9a-fA-F]{4}):([0-9a-fA-F]{4})\b\s*(?:#\s*(.*))?$")
@@ -1497,6 +1501,223 @@ def uninstall() -> None:
     print(f"Config kept at {config_path()}")
 
 
+UPDATE_REPO = "algun/kvm-switcher"
+# Same ref install.ps1 and install.sh fetch from. Keep the three in step.
+UPDATE_REF = "main"
+_VERSION_RE = re.compile(rb'^VERSION = "([^"]+)"', re.M)
+
+
+def version_tuple(text: str) -> tuple[int, ...]:
+    """Comparable form of a dotted version, tolerating a leading v and suffixes."""
+    parts = text.strip().lstrip("vV").split(".")
+    numbers: list[int] = []
+    for part in parts:
+        digits = re.match(r"\d+", part)
+        if not digits:
+            break
+        numbers.append(int(digits.group(0)))
+    return tuple(numbers)
+
+
+def version_is_newer(candidate: str, current: str) -> bool:
+    candidate_parts = version_tuple(candidate)
+    current_parts = version_tuple(current)
+    if not candidate_parts:
+        return False
+    # Pad so 0.2 compares as newer than 0.1.9 but not newer than 0.1.9.1
+    width = max(len(candidate_parts), len(current_parts))
+    pad = lambda parts: parts + (0,) * (width - len(parts))
+    return pad(candidate_parts) > pad(current_parts)
+
+
+def published_version(ref: str = UPDATE_REF, timeout: float = 15.0) -> str:
+    """VERSION of the program published at ref. Raises SystemExit if unreachable."""
+    url = f"https://raw.githubusercontent.com/{UPDATE_REPO}/{ref}/kvm-switcher.py"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            body = response.read()
+    except (urllib.error.URLError, OSError) as exc:
+        raise SystemExit(f"Could not reach {url}: {exc}") from exc
+    match = _VERSION_RE.search(body)
+    if not match:
+        raise SystemExit(f"{url} does not look like kvm-switcher.py")
+    return match.group(1).decode("utf-8", "replace")
+
+
+def running_from_checkout() -> bool:
+    """True when this file sits in a source checkout rather than an install dir."""
+    return (Path(__file__).resolve().parent / ".git").is_dir()
+
+
+def check() -> int:
+    latest = published_version()
+    if version_is_newer(latest, VERSION):
+        print(f"Update available: {VERSION} -> {latest}")
+        print("Run: kvm-switcher.py update")
+        return 0
+    if version_is_newer(VERSION, latest):
+        print(f"Local version {VERSION} is newer than the published {latest}.")
+        return 0
+    print(f"Up to date ({VERSION}).")
+    return 0
+
+
+def _download_program(ref: str = UPDATE_REF) -> bytes:
+    url = f"https://raw.githubusercontent.com/{UPDATE_REPO}/{ref}/kvm-switcher.py"
+    try:
+        with urllib.request.urlopen(url, timeout=30) as response:
+            return response.read()
+    except (urllib.error.URLError, OSError) as exc:
+        raise SystemExit(f"Could not download {url}: {exc}") from exc
+
+
+def _verified_program(body: bytes, expected_newer_than: str) -> bytes:
+    """The downloaded bytes, once they are known to be a working newer program."""
+    # Checked first: a BOM would otherwise read as "not kvm-switcher.py", and it
+    # breaks the shebang that install.sh symlinks onto PATH.
+    if body.startswith(b"\xef\xbb\xbf"):
+        raise SystemExit("Downloaded file starts with a BOM; nothing changed.")
+    if not _VERSION_RE.search(body):
+        raise SystemExit("Downloaded file is not kvm-switcher.py; nothing changed.")
+    try:
+        body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SystemExit(f"Downloaded file is not valid UTF-8: {exc}") from exc
+    # Prove it parses before it replaces a working install.
+    try:
+        compile(body, "<download>", "exec")
+    except SyntaxError as exc:
+        raise SystemExit(f"Downloaded file does not compile: {exc}") from exc
+    match = _VERSION_RE.search(body)
+    downloaded = match.group(1).decode("utf-8", "replace")
+    if not version_is_newer(downloaded, expected_newer_than):
+        raise SystemExit(
+            f"Downloaded version {downloaded} is not newer than {expected_newer_than}; "
+            "nothing changed."
+        )
+    return body
+
+
+def update() -> int:
+    """Replace this program with the published version, then restart the watcher."""
+    target = Path(__file__).resolve()
+    if running_from_checkout():
+        raise SystemExit(
+            f"This is a source checkout ({target.parent}). Update it with git instead: "
+            "git pull"
+        )
+    latest = published_version()
+    if not version_is_newer(latest, VERSION):
+        print(f"Already up to date ({VERSION}).")
+        return 0
+
+    # Only touch the watcher when it is running this very file. A copy installed
+    # elsewhere must never stop a watcher that belongs to a different install.
+    watcher = running_watcher_target()
+    owns_watcher = bool(watcher) and same_program(watcher, str(target))
+
+    body = _verified_program(_download_program(), VERSION)
+
+    stopped = False
+    if owns_watcher:
+        stopped = stop_watcher_process()
+
+    # Write beside the target and swap, so a failure cannot leave a half file.
+    replacement = target.with_name(target.name + ".new")
+    try:
+        replacement.write_bytes(body)
+        shutil.copymode(target, replacement)
+        os.replace(replacement, target)
+    except OSError as exc:
+        try:
+            replacement.unlink()
+        except OSError:
+            pass
+        raise SystemExit(f"Could not replace {target}: {exc}") from exc
+
+    print(f"Updated {target} {VERSION} -> {latest}")
+
+    if stopped:
+        spawn_watcher(target)
+        print("Watcher restarted.")
+    elif watcher:
+        print("A different watcher is running; restart it to use the new version.")
+    return 0
+
+
+def running_watcher_target() -> str:
+    """Command target of the watcher this user is running, or "" when unknown."""
+    pid = read_watcher_pid()
+    if not pid or not process_alive(pid):
+        return ""
+    if sys.platform == "win32":
+        return _windows_process_command(pid)
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return ""
+    parts = [part for part in raw.decode("utf-8", "replace").split("\x00") if part]
+    return " ".join(parts[1:])
+
+
+def _windows_process_command(pid: int) -> str:
+    """Command line of a process. Empty when it cannot be read."""
+    if sys.platform != "win32":
+        return ""
+    # WMI is the only way without extra dependencies; keep it short so a slow
+    # provider cannot stall an update.
+    try:
+        output = subprocess.check_output(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                f"(Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}' "
+                "-ErrorAction SilentlyContinue).CommandLine",
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return output.strip()
+
+
+def same_program(left: str, right: str) -> bool:
+    """True when two command lines point at the same file."""
+    if not left or not right:
+        return False
+
+    def normalise(text: str) -> str:
+        text = text.strip().strip('"')
+        try:
+            return os.path.normcase(str(Path(text).resolve()))
+        except OSError:
+            return os.path.normcase(text)
+
+    left_path = normalise(left)
+    right_path = normalise(right)
+    if left_path == right_path:
+        return True
+    # A command line holds the whole argv; compare its tail against the path.
+    return left_path.endswith(right_path) or right_path.endswith(left_path)
+
+
+def spawn_watcher(program: Path) -> int:
+    """Start a detached watcher. Its stdio must not stay on the caller's pipes:
+    an update run with captured output would otherwise wait on them forever."""
+    process = subprocess.Popen(
+        [sys.executable, str(program)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        start_new_session=True,
+    )
+    return process.pid
+
+
 def main(argv: list[str]) -> None:
     command = argv[1] if len(argv) > 1 else "watch"
     if command in ("configure", "--configure", "-c"):
@@ -1512,6 +1733,10 @@ def main(argv: list[str]) -> None:
         raise SystemExit(switch_monitor(value))
     elif command in ("watch",):
         watch()
+    elif command in ("check", "--check"):
+        raise SystemExit(check())
+    elif command in ("update", "--update", "upgrade"):
+        raise SystemExit(update())
     elif command in ("version", "--version", "-V"):
         print(VERSION)
     elif command in ("-h", "--help", "help"):

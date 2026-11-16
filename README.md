@@ -82,10 +82,12 @@ kvm-switcher.py status          show saved choices and whether the watcher is ru
 kvm-switcher.py install         run at login
 kvm-switcher.py uninstall       stop it and remove the login entry
 kvm-switcher.py switch [code]   switch once, or use the saved input
+kvm-switcher.py check           report whether a newer version is published
+kvm-switcher.py update          replace this program with the published version
 kvm-switcher.py version         print the version
 ```
 
-`install.sh` and `install.ps1` put `kvm-switcher` on `PATH`. `configure` asks `ddcutil` which monitors are connected and which input codes each one advertises, then saves the monitor (`bus`, `name`) and the chosen input. On macOS and Windows that list is not available from here, so configure asks for the input code and, on macOS, the BetterDisplay tag. Nothing is chosen until then. `switch` with no code uses that saved input.
+`install.sh` and `install.ps1` put `kvm-switcher` on `PATH`. `check` compares the running version with the one published on the branch the installer uses, and `update` replaces the installed program with it. `update` refuses to run inside a git checkout (use `git pull` there), verifies the download parses and is newer before replacing anything, and restarts the watcher only when it is running that same file. `configure` asks `ddcutil` which monitors are connected and which input codes each one advertises, then saves the monitor (`bus`, `name`) and the chosen input. On Windows it reads the monitor's own capability string through DDC/CI. On macOS that list is not available, so configure asks for the input code and the BetterDisplay tag. Nothing is chosen until then. `switch` with no code uses that saved input.
 
 ```json
 {
