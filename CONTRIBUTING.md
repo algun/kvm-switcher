@@ -130,8 +130,8 @@ second copy: `build.py`, `release.yml` and `update.py` all read it there.
 4. Commit, push `main`, and push a new tag named `v` plus the version:
 
 ```bash
-git tag v0.2.2
-git push origin v0.2.2
+git tag v0.2.5
+git push origin v0.2.5
 ```
 
 The tag must equal `__version__` exactly, minus the leading `v`, and it must be

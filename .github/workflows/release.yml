@@ -49,9 +49,9 @@ jobs:
           (cd dist && zip -r "kvm-switcher-${ver}.zip" kvm-switcher)
           cp "dist/kvm-switcher-${ver}.zip" dist/kvm-switcher.zip
 
-      # The .pyz is the primary asset: `update` fetches
-      # releases/latest/download/kvm-switcher.pyz, so the name is fixed and must
-      # not gain a version suffix. The archives stay for anyone who wants them.
+      # The installers and the seed config are published as their own assets so
+      # the documented one-liner can fetch them from the newest release instead
+      # of a branch: what a user runs is then exactly what was tagged and tested.
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -61,6 +61,9 @@ jobs:
             --title "$GITHUB_REF_NAME" \
             --notes "kvm-switcher ${ver}" \
             dist/kvm-switcher.pyz \
+            install.sh \
+            install.ps1 \
+            config.json \
             dist/kvm-switcher.tar.gz \
             dist/kvm-switcher.zip \
             "dist/kvm-switcher-${ver}.tar.gz" \

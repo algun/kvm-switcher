@@ -11,8 +11,10 @@
 $ErrorActionPreference = "Stop"
 
 $repo = "algun/kvm-switcher"
-$ref = "main"
 $program = "kvm-switcher.pyz"
+# Everything comes from the newest release, never from a branch: what you run is
+# what was tagged and tested, so a commit pushed to main cannot reach you.
+$releaseUrl = "https://github.com/$repo/releases/latest/download"
 $minMajor = 3
 $minMinor = 9
 $dest = Join-Path $env:LOCALAPPDATA "kvm-switcher"
@@ -131,7 +133,7 @@ if ($local) {
     # The zipapp is a release asset, not a file in the repository: it is built
     # at release time. `latest/download` keeps the name stable, which is also
     # what `kvm-switcher update` fetches, so both paths get the same artifact.
-    $url = "https://github.com/$repo/releases/latest/download/$program"
+    $url = "$releaseUrl/$program"
     Write-Host "Downloading $url"
     # -UseBasicParsing: Windows PowerShell 5.1 can fail without it when the
     # Internet Explorer engine has never been initialised.
@@ -142,7 +144,7 @@ if ($local) {
     }
     # The seed config is optional: a missing one only means `configure` asks.
     try {
-        Invoke-WebRequest -Uri "https://raw.githubusercontent.com/$repo/$ref/config.json" `
+        Invoke-WebRequest -Uri "https://github.com/$repo/releases/latest/download/config.json" `
             -OutFile (Join-Path $dest "config.json") -UseBasicParsing
     } catch {
         Write-Host "No seed config downloaded; 'kvm-switcher configure' will ask instead."

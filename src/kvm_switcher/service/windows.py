@@ -19,8 +19,12 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 
 def command() -> str:
-    """The command line a task or Run-key entry stores."""
-    return subprocess.list2cmdline(install_root.program_argv())
+    """The command line a task or Run-key entry stores.
+
+    Background, because this runs at logon: a console interpreter would put a
+    terminal panel on screen whose window closes the watcher when closed.
+    """
+    return subprocess.list2cmdline(install_root.program_argv(background=True))
 
 
 def install() -> None:
@@ -39,7 +43,7 @@ def install() -> None:
             file=sys.stderr,
         )
         _write_run_key()
-    write_watcher_pid(spawn_watcher(install_root.program_argv(), detach=False))
+    write_watcher_pid(spawn_watcher(install_root.program_argv(background=True), detach=False))
 
 
 def _write_run_key() -> None:

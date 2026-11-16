@@ -49,31 +49,27 @@ There is nothing to `pip install`: the program uses only the standard library.
 On Linux or macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/algun/kvm-switcher/main/install.sh | bash
+curl -fsSL https://github.com/algun/kvm-switcher/releases/latest/download/install.sh | bash
 ```
 
 On Windows:
 
 ```powershell
-irm https://raw.githubusercontent.com/algun/kvm-switcher/main/install.ps1 | iex
+irm https://github.com/algun/kvm-switcher/releases/latest/download/install.ps1 | iex
 ```
 
-**Read this before piping either one.** The command runs the installer exactly as
-it exists on the `main` branch at that moment (the `$ref` line in `install.ps1`
-and `install.sh`), and `main` is not gated on a release, so a broken commit
-reaches you as easily as a working one. The program itself does not come from
-`main`: the installer downloads `releases/latest/download/kvm-switcher.pyz`, the
-same asset `kvm-switcher update` uses, so the payload is always the newest
-release. To decide what you run before you run it, download the script, read it,
-and run it locally:
+`releases/latest/download` always resolves to the newest published release, so
+the installer you run and the program it installs both come from the same tagged,
+tested build. Nothing is fetched from a development branch, and an unreleased
+commit cannot reach you.
+
+If you would rather read the script before running it, which is always
+reasonable for something piped into a shell, download it first:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/algun/kvm-switcher/v0.2.2/install.sh
+curl -fsSLO https://github.com/algun/kvm-switcher/releases/latest/download/install.sh
 bash install.sh
 ```
-
-The `$ref` inside that copy still says `main`, and it only affects the seed
-`config.json`; change it to `v0.2.2` as well if you want that fetch pinned too.
 
 ### macOS before you install
 

@@ -289,7 +289,7 @@ def _stop_owned_watcher() -> bool:
 def _restart_owned_watcher() -> bool:
     """Stop and respawn the watcher for this install. True when it happened."""
     _stop_owned_watcher()
-    spawn_watcher(install_root.program_argv())
+    spawn_watcher(install_root.program_argv(background=True))
     return True
 
 
@@ -319,7 +319,7 @@ def _apply_legacy(
     print("Updated {} {} -> {}".format(target, __version__, latest))
     print("The new version is live on the next command you run.")
     if restart:
-        spawn_watcher(install_root.program_argv())
+        spawn_watcher(install_root.program_argv(background=True))
         print("Watcher restarted on {}.".format(latest))
     elif watcher:
         print("A different watcher is running; restart it to use the new version.")

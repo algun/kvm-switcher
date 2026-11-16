@@ -153,7 +153,7 @@ def seed_path() -> Optional[Path]:
     return None
 
 
-def _bootstrap_argv() -> List[str]:
+def _bootstrap_argv(executable: str = "") -> List[str]:
     """A ``-c`` launcher that imports the package without any environment setup.
 
     Used only for a directory install outside ``sys.path``. Being a single argv
@@ -167,12 +167,32 @@ def _bootstrap_argv() -> List[str]:
         "from kvm_switcher.cli import main; "
         "raise SystemExit(main(['kvm-switcher'] + sys.argv[1:]))"
     ).format(path=str(import_dir()))
-    return [sys.executable, "-c", code]
+    return [executable or sys.executable, "-c", code]
 
 
-def program_argv() -> List[str]:
-    """Command that runs this installation, without the subcommand."""
+def program_argv(background: bool = False) -> List[str]:
+    """Command that runs this installation, without the subcommand.
+
+    ``background`` selects a windowless interpreter on Windows. The login entry
+    launches at logon, where ``python.exe`` is a console program: Windows opens
+    a terminal panel for it, and closing that panel kills the watcher. There is
+    no console program to attach to, so ``pythonw.exe`` is the correct
+    interpreter for anything the user does not start themselves.
+    """
     target = program_path()
+    executable = _background_executable() if background else sys.executable
     if target is not None:
-        return [sys.executable, str(target)]
-    return _bootstrap_argv()
+        return [executable, str(target)]
+    return _bootstrap_argv(executable)
+
+
+def _background_executable() -> str:
+    """The windowless interpreter beside the current one, when there is one.
+
+    Falls back to the running interpreter so a layout without ``pythonw.exe``
+    still works; a visible panel is worse than nothing, a missing entry is not.
+    """
+    if not sys.platform.startswith("win"):
+        return sys.executable
+    candidate = Path(sys.executable).with_name("pythonw.exe")
+    return str(candidate) if candidate.is_file() else sys.executable

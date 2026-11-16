@@ -10,8 +10,8 @@
 set -euo pipefail
 
 repo="algun/kvm-switcher"
-ref="main"
 program="kvm-switcher.pyz"
+release_url="https://github.com/${repo}/releases/latest/download"
 min_major=3
 min_minor=9
 dest="${HOME}/.local/share/kvm-switcher"
@@ -70,18 +70,16 @@ elif [[ -f "${here}/dist/${program}" ]]; then
   # A source checkout, where the build writes into dist/.
   src="${here}/dist"
 else
-  # Piped from a URL, so there is no checkout to copy from. The zipapp is a
-  # release asset rather than a repository file, so it comes from
-  # `latest/download`; that is also what `kvm-switcher update` fetches, so both
-  # paths get the same artifact. $ref stays in step with install.ps1 for the
-  # seed config.
+  # Piped from a URL, so there is no checkout to copy from. Everything comes from
+  # the newest release, so what you run is what was tagged and tested: no branch
+  # is consulted, and a commit pushed to main cannot reach you before a release.
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   mkdir -p "${tmp}/kvm-switcher"
-  curl -fsSL -L "https://github.com/${repo}/releases/latest/download/${program}" \
+  curl -fsSL -L "${release_url}/${program}" \
     -o "${tmp}/kvm-switcher/${program}"
   # The seed config is optional: a missing one only means `configure` asks.
-  curl -fsSL -L "https://raw.githubusercontent.com/${repo}/${ref}/config.json" \
+  curl -fsSL -L "${release_url}/config.json" \
     -o "${tmp}/kvm-switcher/config.json" || rm -f "${tmp}/kvm-switcher/config.json"
   src="${tmp}/kvm-switcher"
 fi
