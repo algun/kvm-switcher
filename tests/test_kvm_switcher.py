@@ -427,5 +427,46 @@ class ShellSyntaxTests(unittest.TestCase):
             subprocess.run(["bash", "-n", str(script)], check=True)
 
 
+class PortabilityTests(unittest.TestCase):
+    """The module has to import on every OS, not just the one running the tests."""
+
+    def test_import_survives_without_windows_ctypes_symbols(self):
+        # ctypes.WINFUNCTYPE/WinDLL exist only on Windows. Binding one at module
+        # level made `import kvm-switcher` raise AttributeError on Linux and
+        # macOS, which broke every non-Windows install.
+        code = (
+            "import ctypes, importlib.util, sys\n"
+            "for name in ('WINFUNCTYPE', 'WinDLL', 'windll'):\n"
+            "    if hasattr(ctypes, name):\n"
+            "        delattr(ctypes, name)\n"
+            f"spec = importlib.util.spec_from_file_location('ks_probe', {str(SCRIPT)!r})\n"
+            "module = importlib.util.module_from_spec(spec)\n"
+            "sys.modules['ks_probe'] = module\n"
+            "spec.loader.exec_module(module)\n"
+            "print('ok')\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, timeout=90
+        )
+        self.assertEqual(
+            result.returncode, 0,
+            f"module failed to import without Windows ctypes symbols:\n{result.stderr}",
+        )
+
+    def test_no_windows_binding_at_module_level(self):
+        # Inside a function is fine (it only runs on Windows); at module scope it
+        # runs on every import. Only inspect top-level expressions, not bodies.
+        import ast
+        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+        offenders = []
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue  # bodies only execute when called
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Attribute) and sub.attr in {"WinDLL", "WINFUNCTYPE", "windll"}:
+                    offenders.append((sub.attr, getattr(sub, "lineno", 0)))
+        self.assertEqual(offenders, [], "Windows-only ctypes call at module scope")
+
+
 if __name__ == "__main__":
     unittest.main()

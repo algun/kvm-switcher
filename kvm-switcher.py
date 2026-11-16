@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 INTERVAL = 0.5
 VCP_INPUT = 0x60
 DEV_RE = re.compile(r"^([0-9a-fA-F]{4}):([0-9a-fA-F]{4})\b\s*(?:#\s*(.*))?$")
@@ -923,9 +923,22 @@ class _PHYSICAL_MONITOR(ctypes.Structure):
     ]
 
 
-_WINDOWS_MONITOR_CALLBACK = ctypes.WINFUNCTYPE(
-    ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(_RECT), ctypes.c_ssize_t
-)
+# Built lazily: ctypes.WINFUNCTYPE exists only on Windows, and importing this
+# module on Linux or macOS must not fail.
+_WINDOWS_MONITOR_CALLBACK_TYPE = None
+
+
+def _windows_monitor_callback_type():
+    global _WINDOWS_MONITOR_CALLBACK_TYPE
+    if _WINDOWS_MONITOR_CALLBACK_TYPE is None:
+        _WINDOWS_MONITOR_CALLBACK_TYPE = ctypes.WINFUNCTYPE(
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(_RECT),
+            ctypes.c_ssize_t,
+        )
+    return _WINDOWS_MONITOR_CALLBACK_TYPE
 
 
 class _PhysicalHandles:
@@ -962,7 +975,7 @@ def _windows_physical_monitors():
             collected.append((monitor.description, monitor.handle, monitors, count))
         return 1
 
-    callback = _WINDOWS_MONITOR_CALLBACK(_callback)
+    callback = _windows_monitor_callback_type()(_callback)
     user32.EnumDisplayMonitors(None, None, callback, 0)
     return dxva2, collected
 
