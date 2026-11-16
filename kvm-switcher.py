@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 INTERVAL = 0.5
 VCP_INPUT = 0x60
 DEV_RE = re.compile(r"^([0-9a-fA-F]{4}):([0-9a-fA-F]{4})\b\s*(?:#\s*(.*))?$")
@@ -290,12 +290,23 @@ def parse_windows_devices(output: str) -> list[tuple[str, str]]:
 
 def windows_device_script() -> str:
     """PowerShell fallback. The format string must stay double-quoted: PowerShell
-    only expands `t inside double quotes, and the parser needs a real tab."""
+    only expands `t inside double quotes, and the parser needs a real tab.
+
+    BusReportedDeviceDesc carries the product string a USB device reports about
+    itself, and child interfaces carry it when the parent does not.
+    """
     return (
-        "Get-PnpDevice -PresentOnly | Where-Object { "
-        "$_.InstanceId -match '^USB\\\\VID_' -and $_.InstanceId -notmatch '&MI_' } | "
+        "$names = @{}; "
+        "Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -match '^USB\\\\VID_' } | "
         "ForEach-Object { if ($_.InstanceId -match 'VID_([0-9A-F]{4})&PID_([0-9A-F]{4})') { "
-        "\"{0}:{1}`t{2}\" -f $Matches[1].ToLower(), $Matches[2].ToLower(), $_.FriendlyName } }"
+        "$id = '{0}:{1}' -f $Matches[1].ToLower(), $Matches[2].ToLower(); "
+        "$name = $null; "
+        "foreach ($key in 'DEVPKEY_Device_BusReportedDeviceDesc','DEVPKEY_Device_FriendlyName') { "
+        "try { $name = (Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName $key -ErrorAction Stop).Data } catch { }; "
+        "if ($name) { break } }; "
+        "if (-not $name) { $name = $_.FriendlyName }; "
+        "if ($name -and (-not $names[$id] -or $name.Length -gt $names[$id].Length)) { $names[$id] = $name } } }; "
+        "$names.GetEnumerator() | ForEach-Object { \"{0}`t{1}\" -f $_.Key, $_.Value }"
     )
 
 
@@ -305,6 +316,13 @@ class _GUID(ctypes.Structure):
         ("Data2", ctypes.c_ushort),
         ("Data3", ctypes.c_ushort),
         ("Data4", ctypes.c_ubyte * 8),
+    ]
+
+
+class _DEVPROPKEY(ctypes.Structure):
+    _fields_ = [
+        ("fmtid", _GUID),
+        ("prop_id", ctypes.c_ulong),
     ]
 
 
@@ -321,8 +339,49 @@ _DIGCF_PRESENT = 0x02
 _DIGCF_ALLCLASSES = 0x04
 _SPDRP_DEVICEDESC = 0x00
 _SPDRP_HARDWAREID = 0x01
+_SPDRP_SERVICE = 0x04
 _SPDRP_FRIENDLYNAME = 0x0C
 _WINDOWS_HWID_RE = re.compile(r"VID_([0-9A-F]{4})&PID_([0-9A-F]{4})", re.I)
+_DEVPROP_TYPE_STRING = 0x12
+_DEVPROP_TYPE_STRING_LIST = 0x13
+
+# Windows fills this for a device whose driver gives no friendly name. It holds
+# the product string the USB device reports about itself, which is the only
+# human-readable name available for most peripherals.
+_BUS_REPORTED_DESC = _DEVPROPKEY(
+    _GUID(0x540B947E, 0x8B40, 0x45BC, (ctypes.c_ubyte * 8)(0xA8, 0xA2, 0x6A, 0x0B, 0x89, 0x4C, 0xBD, 0xA2)),
+    4,
+)
+
+# Class names Windows uses when a device reports nothing about itself.
+_GENERIC_DEVICE_NAMES = frozenset(
+    name.casefold()
+    for name in (
+        "USB Composite Device",
+        "USB Input Device",
+        "USB Device",
+        "Generic USB Hub",
+        "Generic SuperSpeed USB Hub",
+        "USB Root Hub",
+        "USB Host Controller",
+        "Unknown USB Device",
+        "HID-compliant device",
+        "HID-compliant vendor-defined device",
+        "HID-compliant mouse",
+        "HID-compliant system controller",
+        "HID-compliant consumer control device",
+        "USB Video Device",
+        "USB Audio Device",
+        "USB Serial Device",
+        "WinUsb Device",
+    )
+)
+
+
+def useful_device_name(name: str) -> bool:
+    """True when a name says something about the device, not just its USB class."""
+    cleaned = name.strip()
+    return bool(cleaned) and cleaned.casefold() not in _GENERIC_DEVICE_NAMES
 
 
 def _registry_property(setupapi, devinfo, data, prop: int) -> str:
@@ -335,6 +394,26 @@ def _registry_property(setupapi, devinfo, data, prop: int) -> str:
         return ""
     # The buffer holds a REG_MULTI_SZ for hardware ids; the first entry is enough.
     return buffer.value.split("\x00", 1)[0] if buffer.value else ""
+
+
+def _device_property(setupapi, devinfo, data, key: _DEVPROPKEY) -> str:
+    """A string device property, or "" when the device does not expose one."""
+    buffer = ctypes.create_unicode_buffer(512)
+    needed = ctypes.c_ulong()
+    prop_type = ctypes.c_ulong()
+    ok = setupapi.SetupDiGetDevicePropertyW(
+        devinfo,
+        ctypes.byref(data),
+        ctypes.byref(key),
+        ctypes.byref(prop_type),
+        buffer,
+        ctypes.sizeof(buffer),
+        ctypes.byref(needed),
+        0,
+    )
+    if not ok or prop_type.value not in (_DEVPROP_TYPE_STRING, _DEVPROP_TYPE_STRING_LIST):
+        return ""
+    return buffer.value.split("\x00", 1)[0].strip() if buffer.value else ""
 
 
 def _windows_devices_setupapi() -> list[tuple[str, str]] | None:
@@ -366,14 +445,29 @@ def _windows_devices_setupapi() -> list[tuple[str, str]] | None:
     ]
     setupapi.SetupDiDestroyDeviceInfoList.restype = ctypes.c_bool
     setupapi.SetupDiDestroyDeviceInfoList.argtypes = [ctypes.c_void_p]
+    setupapi.SetupDiGetDevicePropertyW.restype = ctypes.c_bool
+    setupapi.SetupDiGetDevicePropertyW.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(_SP_DEVINFO_DATA),
+        ctypes.POINTER(_DEVPROPKEY),
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.c_ulong,
+    ]
 
     devinfo = setupapi.SetupDiGetClassDevsW(
         None, None, None, _DIGCF_PRESENT | _DIGCF_ALLCLASSES
     )
     if not devinfo or devinfo == ctypes.c_void_p(-1).value:
         return None
-    found: list[tuple[str, str]] = []
-    seen: set[str] = set()
+
+    # A composite device reports its product string on its child interfaces, and
+    # the parent usually has no name at all, so names are collected per VID:PID
+    # from every instance and the most descriptive one wins.
+    names: dict[str, str] = {}
+    order: list[str] = []
     try:
         index = 0
         while True:
@@ -383,28 +477,33 @@ def _windows_devices_setupapi() -> list[tuple[str, str]] | None:
                 break
             index += 1
             hardware = _registry_property(setupapi, devinfo, data, _SPDRP_HARDWAREID)
-            # Same scope as the PowerShell query: USB devices only, and
-            # &MI_ marks one interface of a composite device, not the device itself.
+            # Same scope as the PowerShell query, but child interfaces are kept:
+            # they are where the product string lives.
             if not hardware.upper().startswith("USB\\VID_"):
-                continue
-            if "&MI_" in hardware.upper():
                 continue
             match = _WINDOWS_HWID_RE.search(hardware)
             if not match:
                 continue
             vidpid = f"{match.group(1)}:{match.group(2)}".lower()
-            if vidpid in seen:
-                continue
-            seen.add(vidpid)
-            name = (
-                _registry_property(setupapi, devinfo, data, _SPDRP_FRIENDLYNAME)
-                or _registry_property(setupapi, devinfo, data, _SPDRP_DEVICEDESC)
-                or vidpid
+            if vidpid not in names:
+                order.append(vidpid)
+                names[vidpid] = ""
+
+            candidates = (
+                _device_property(setupapi, devinfo, data, _BUS_REPORTED_DESC),
+                _registry_property(setupapi, devinfo, data, _SPDRP_FRIENDLYNAME),
+                _registry_property(setupapi, devinfo, data, _SPDRP_DEVICEDESC),
             )
-            found.append((vidpid, name))
+            current = names[vidpid]
+            for candidate in candidates:
+                if not useful_device_name(candidate):
+                    continue
+                if not current or len(candidate) > len(current):
+                    current = candidate
+            names[vidpid] = current
     finally:
         setupapi.SetupDiDestroyDeviceInfoList(devinfo)
-    return found
+    return [(vidpid, names[vidpid] or vidpid) for vidpid in order]
 
 
 def _connected_windows() -> list[tuple[str, str]]:

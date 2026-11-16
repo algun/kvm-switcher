@@ -150,9 +150,27 @@ class DeviceListingTests(unittest.TestCase):
 
     def test_windows_script_format_string_is_double_quoted(self):
         script = ks.windows_device_script()
-        self.assertIn("\"{0}:{1}`t{2}\"", script)
-        # A leading single quote would suppress the escape again.
-        self.assertNotIn("'{0}:{1}", script)
+        # The tab lives in the output format string, which must be double-quoted:
+        # PowerShell only expands `t there. A single-quoted one emitted "`t".
+        self.assertIn('"{0}`t{1}"', script)
+        self.assertNotIn("\"{0}:{1}`t", script)
+        # The product string is what makes a device identifiable; the old query
+        # only read FriendlyName and the USB class name.
+        self.assertIn("BusReportedDeviceDesc", script)
+        self.assertNotIn("-notmatch '&MI_'", script)
+
+    def test_generic_names_are_not_useful(self):
+        for name in (
+            "USB Composite Device",
+            "USB Input Device",
+            "Generic USB Hub",
+            "usb composite device",
+            "",
+            "   ",
+        ):
+            self.assertFalse(ks.useful_device_name(name), name)
+        for name in ("Razer Seiren V3 Mini", "8BitDo Retro 18 Numpad", "USB2.1 Hub"):
+            self.assertTrue(ks.useful_device_name(name), name)
 
 
 class DisplayDiscoveryTests(unittest.TestCase):
