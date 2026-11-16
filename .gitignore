@@ -3,12 +3,16 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+build/
 dist/
+*.egg-info/
+.pytest_cache/
 *.tar.gz
 *.zip
 .DS_Store
 # Local scratch scripts, so a throwaway probe is never committed by accident.
 _probe_*.py
 _probe_*.ps1
+_probe_*.sh
 _release_*.ps1
 _publish.ps1

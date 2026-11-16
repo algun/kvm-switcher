@@ -6,10 +6,69 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One broken platform must not cancel the others: the point of the matrix
+      # is to see every result, not just the first failure.
+      fail-fast: false
+      # The legs are listed out rather than generated from an os x version
+      # product, because the macOS floor cannot be expressed as one.
+      #
+      # Python 3.9 is the real floor (`requires-python = ">=3.9"`), so Linux and
+      # Windows test 3.9 itself. On macOS the floor leg runs on an Intel runner
+      # on purpose:
+      #
+      #   `macos-latest` is macos-26-arm64, and actions/python-versions ships a
+      #   darwin arm64 build of 3.9 only for 3.9.12 and 3.9.13. Every 3.9.14+
+      #   entry in that manifest is darwin x64 only, because Apple silicon 3.9
+      #   builds stopped when 3.9 went EOL. So asking an arm64 runner for "3.9"
+      #   can only resolve to a 2022 patch, and the macOS 26 images no longer
+      #   carry a 3.9 to fall back on either.
+      #
+      # macos-13 and macos-14 are both retired, so macos-15-intel is the newest
+      # Intel label available. There "3.9" resolves to the newest darwin x64
+      # 3.9, which is the interpreter a macOS user actually runs.
+      #
+      # Tradeoff: no job runs 3.9 on arm64. That leg cannot be installed on a
+      # hosted runner at all, so a green job for it would be fiction rather
+      # than coverage. Apple silicon is covered at 3.12 instead, so both macOS
+      # architectures are still exercised - more than the old product matrix,
+      # which only ever ran arm64.
+      #
+      # Consequence for maintenance: bumping the Python list means touching one
+      # line per OS, and anyone adding a macOS leg must say whether it is intel
+      # or arm64. A product matrix hides that decision; here it is explicit.
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.9"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.9"
+          - os: windows-latest
+            python-version: "3.12"
+          - os: macos-15-intel
+            python-version: "3.9"
+          - os: macos-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-      - run: python3 -m unittest discover -s tests -v
+          python-version: ${{ matrix.python-version }}
+      # Print what actually resolved, so a leg that silently drifted to another
+      # patch or architecture is visible in the log instead of inferred from a
+      # version number in a comment.
+      - name: Show the resolved interpreter
+        run: python -c "import platform, sys; print('Python', sys.version); print('machine', platform.machine())"
+      - run: python -m pip install --disable-pip-version-check pytest
+      # `python`, not `python3`: setup-python puts the chosen interpreter on PATH
+      # as `python` on all three runners, and Windows has no `python3` at all.
+      - run: python -m pytest -q
+
+      # The zipapp is the shipped artifact, so build and run it on every OS the
+      # program supports, not only where a release is cut.
+      - run: python build.py
+      - run: python dist/kvm-switcher.pyz version

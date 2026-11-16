@@ -1,38 +1,52 @@
 # kvm-switcher
 
+Keeps one shared monitor showing the right computer: when the keyboard and mouse
+arrive on a machine, this program selects that machine's input on the monitor.
+It runs on Linux, macOS, and Windows.
+
 ## Why
 
-This needs a hardware KVM that switches USB only. That switch moves the keyboard, mouse, and other USB devices to the computer you are using, and it does not change the monitor input. One monitor stays shared, so the picture stays on the previous computer until you change the input by hand. This program watches for those USB devices on the machine they were switched to and sets the monitor input when one of them appears, so the display follows the peripherals. Without that USB KVM there is nothing for it to watch.
+This needs a hardware KVM that switches USB only. That switch moves the keyboard,
+mouse, and other USB devices to the computer you are using, and it does not
+change the monitor input. One monitor stays shared, so the picture stays on the
+previous computer until you change the input by hand. This program watches for
+the USB devices on the machine they were switched to and sets the monitor input
+when one of them appears, so the display follows the peripherals.
 
-It runs on Linux (`ddcutil`), macOS (BetterDisplay), and Windows (DDC/CI).
+Two requirements come with that design, and neither is optional:
 
-Settings live in `~/.config/kvm-switcher/config.json` (`%APPDATA%\kvm-switcher\config.json` on Windows). Override the path with `KVM_CONFIG`. `config.json` in this repo is only the USB-device seed copied on first run. An older `devices.txt` next to the JSON file is still read until the next `configure`, which rewrites `config.json`.
+- The KVM must switch **USB only**, and every machine must keep its own video
+  cable to the monitor. If the KVM switches video, the monitor follows it by
+  itself and there is nothing for this program to do.
+- The program needs a working DDC/CI path to the monitor. It sends the standard
+  input-select command; it cannot invent an input the monitor does not have, and
+  it cannot undo a wrong switch (see [what it cannot do](#what-it-cannot-do)).
 
-## Dependencies
+## Requirements
 
-Python 3 is the only language runtime. The program uses the standard library, so there is nothing to `pip install`. Python is not built into every system: many Linux installs already have `python3`, but macOS and Windows do not. Install it from python.org or your package manager. The Unix scripts call `python3`; the PowerShell scripts call `python`.
+**Python 3.9 or newer.** Both installers check this by running the interpreter
+before they write anything, and stop with the right command for your system if
+it is missing or too old.
+
+```text
+winget install --id Python.Python.3.12 -e     # Windows
+brew install python@3.12                      # macOS
+sudo apt install python3                      # Debian/Ubuntu
+```
 
 | System | Also required |
 | --- | --- |
-| Linux | `ddcutil` (switch the monitor), `lsusb` from `usbutils` (list USB devices), systemd (login service) |
-| macOS | [BetterDisplay](https://github.com/waydabber/BetterDisplay) and its [`betterdisplaycli`](https://github.com/waydabber/betterdisplaycli) (switch the monitor). USB listing uses `ioreg`, which is already installed |
-| Windows | Nothing else. Display switching uses the Windows API, and USB listing uses `setupapi` through ctypes (falling back to PowerShell) |
+| Linux | `ddcutil` (talks to the monitor) and `lsusb` from `usbutils` (lists USB devices). The login watcher uses systemd |
+| macOS | [BetterDisplay](https://github.com/waydabber/BetterDisplay) with its [`betterdisplaycli`](https://github.com/waydabber/betterdisplaycli), installed with `brew install waydabber/betterdisplay/betterdisplaycli`. USB listing uses `ioreg`, which is already there |
+| Windows | Nothing else. The monitor is driven through the Windows API and USB devices are read through `setupapi` |
 
-On macOS, install the CLI with `brew install waydabber/betterdisplay/betterdisplaycli`. BetterDisplay has to be running, and CLI access has to be on (that is the default). This program sends a direct DDC input-select command. [BetterDisplay lists DDC input switching as free](https://github.com/waydabber/BetterDisplay/wiki/List-of-free-and-Pro-features) for personal use after the 14-day Pro trial. Other CLI features are Pro. A business using the app needs a Pro license even for the free features.
+There is nothing to `pip install`: the program uses only the standard library.
 
 ## Install
 
-From a checkout:
+### The one-liners
 
-```bash
-./install.sh
-```
-
-```powershell
-.\install.ps1
-```
-
-Without a checkout, the same scripts run from a URL and download the program from the `main` branch. On Linux or macOS:
+On Linux or macOS:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/algun/kvm-switcher/main/install.sh | bash
@@ -44,76 +58,111 @@ On Windows:
 irm https://raw.githubusercontent.com/algun/kvm-switcher/main/install.ps1 | iex
 ```
 
-A piped run has no checkout beside it, so it fetches `kvm-switcher.py` and `config.json` from the `main` branch (the `$ref` line in `install.ps1` and `install.sh`). That means whatever is on `main` reaches users, tests or not. For a reproducible install, pin the URL to a tag such as `v0.1.1` and set `$ref` accordingly.
-
-That puts `kvm-switcher` on `PATH` (`~/.local/bin` on Linux and macOS, `%USERPROFILE%\bin\kvm-switcher.cmd` on Windows). It does not start the login watcher. Run `kvm-switcher configure`, then `kvm-switcher install` if you want it at login.
-
-To publish a release, bump `VERSION` in `kvm-switcher.py`, commit, and push a matching tag:
-
-```bash
-git tag v0.1.1
-git push origin v0.1.1
-```
-
-The tag must be `v` plus `VERSION`, and it must be a new tag: pushing a commit does not move an existing one. The release workflow runs the tests and attaches `kvm-switcher.tar.gz` and `kvm-switcher.zip`.
-
-## Quick start
+**Read this before piping either one.** The command runs the installer exactly as
+it exists on the `main` branch at that moment (the `$ref` line in `install.ps1`
+and `install.sh`), and `main` is not gated on a release, so a broken commit
+reaches you as easily as a working one. The program itself does not come from
+`main`: the installer downloads `releases/latest/download/kvm-switcher.pyz`, the
+same asset `kvm-switcher update` uses, so the payload is always the newest
+release. To decide what you run before you run it, download the script, read it,
+and run it locally:
 
 ```bash
-python3 kvm-switcher.py configure   # pick USB devices, the monitor, and its input
-python3 kvm-switcher.py status      # saved choices and whether the watcher is running
-python3 kvm-switcher.py             # watch in this window; asks to install at login
+curl -fsSLO https://raw.githubusercontent.com/algun/kvm-switcher/v0.2.2/install.sh
+bash install.sh
 ```
 
-On Windows, run `python kvm-switcher.py` with the same commands.
+The `$ref` inside that copy still says `main`, and it only affects the seed
+`config.json`; change it to `v0.2.2` as well if you want that fetch pinned too.
 
-`install` copies the program to `~/bin` and starts it at login (a systemd user service, a launchd agent, or a scheduled task). `uninstall` removes that entry and leaves `config.json` in place.
+### macOS before you install
 
-On Windows the watcher runs as a Scheduled Task. If the task cannot be created (some machines require elevation for `schtasks`), `install` says so and falls back to a per-user `Run` registry entry instead. Either way the watcher writes `%APPDATA%\kvm-switcher\watcher.pid`, which is how `status` and `uninstall` find the running process.
+BetterDisplay must be installed and running, with CLI access on (that is the
+default), because this program shells out to `betterdisplaycli`:
 
-Because Windows reports most panels as `Generic PnP Monitor` rather than their real model name, a saved monitor name that does not match still matches a generic description. A monitor with a distinct name is never switched.
+```bash
+brew install waydabber/betterdisplay/betterdisplaycli
+```
+
+It also sends one direct DDC input-select command, and that is a licensing
+question rather than a technical one: [BetterDisplay lists DDC input switching
+as free](https://github.com/waydabber/BetterDisplay/wiki/List-of-free-and-Pro-features)
+for personal use once the 14-day Pro trial ends, and other CLI features are Pro.
+A business using BetterDisplay needs a Pro licence even for the features that are
+free for personal use. Settle that before you standardise on this platform.
+
+### From a checkout
+
+```bash
+./install.sh        # or: .\install.ps1
+```
+
+It installs the built `dist/kvm-switcher.pyz` when you have one (build it with
+`python build.py`), and otherwise downloads the latest release.
+
+### What lands on disk
+
+| System | Program | Command on `PATH` |
+| --- | --- | --- |
+| Linux, macOS | `~/.local/share/kvm-switcher/kvm-switcher.pyz` | `~/.local/bin/kvm-switcher`, a small launcher written by the installer |
+| Windows | `%LOCALAPPDATA%\kvm-switcher\kvm-switcher.pyz` | `%USERPROFILE%\bin\kvm-switcher.cmd`, with `%USERPROFILE%\bin` added to your user `PATH` |
+
+The installer does not start anything. Open a new terminal afterwards, because
+a shell that was already running keeps its old `PATH`.
+
+## First run
+
+```bash
+kvm-switcher configure    # pick the USB devices and the monitor input
+kvm-switcher status       # show the saved choices and whether the watcher runs
+kvm-switcher install      # start the watcher now and at every login
+```
+
+`configure` lists the USB devices present, and the input codes your monitor
+advertises, with names such as `HDMI-1` or `DisplayPort-1`. On macOS it cannot
+read that list, so it asks for the input code and the BetterDisplay tag by hand.
+Your choices are saved to `~/.config/kvm-switcher/config.json`
+(`%APPDATA%\kvm-switcher\config.json` on Windows); set `KVM_CONFIG` to use a
+different file. See [docs/design.md](docs/design.md) for the file format.
+
+Once installed, the watcher switches the monitor when a selected device appears,
+and re-arms when it goes away, so moving the KVM back and forth keeps working.
 
 ## Commands
 
 ```text
-kvm-switcher.py                 watch (asks to install on first interactive run)
-kvm-switcher.py configure       pick devices, the monitor, and its input
-kvm-switcher.py status          show saved choices and whether the watcher is running
-kvm-switcher.py install         run at login
-kvm-switcher.py uninstall       stop it and remove the login entry
-kvm-switcher.py switch [code]   switch once, or use the saved input
-kvm-switcher.py check           report whether a newer version is published
-kvm-switcher.py update          replace this program with the published version
-kvm-switcher.py version         print the version
+kvm-switcher                 watch in this window; offers to install at login
+kvm-switcher configure       pick devices, the monitor, and its input
+kvm-switcher status          show saved choices and whether the watcher is running
+kvm-switcher install         run at login
+kvm-switcher uninstall       stop it and remove the login entry
+kvm-switcher switch [code]   switch once, or use the saved input
+kvm-switcher check           report whether a newer version is published
+kvm-switcher update          replace this program with the published version
+kvm-switcher version         print the version
 ```
 
-`install.sh` and `install.ps1` put `kvm-switcher` on `PATH`. `check` compares the running version with the one published on the branch the installer uses, and `update` replaces the installed program with it. `update` refuses to run inside a git checkout (use `git pull` there), verifies the download parses and is newer before replacing anything, and restarts the watcher only when it is running that same file. `configure` asks `ddcutil` which monitors are connected and which input codes each one advertises, then saves the monitor (`bus`, `name`) and the chosen input. On Windows it reads the monitor's own capability string through DDC/CI. On macOS that list is not available, so configure asks for the input code and the BetterDisplay tag. Nothing is chosen until then. `switch` with no code uses that saved input.
+`update` downloads the published program, verifies it, and says plainly whether
+the new version is live now or takes effect on the next launch. `uninstall`
+leaves `config.json` alone. [docs/design.md](docs/design.md) explains the rest.
 
-```json
-{
-  "devices": [{"id": "1234:abcd", "name": "USB receiver"}],
-  "display": {"name": "Monitor", "bus": "5", "input": "0x0f", "inputLabel": "DisplayPort-1"}
-}
-```
+## When something goes wrong
 
-## Tests
+`'python' is not recognized`, `kvm-switcher` not found right after installing,
+`ERROR: Access is denied.` during `install`, a screen that flashes twice per
+switch, or a monitor that goes black after `switch`: each one is covered in
+[docs/troubleshooting.md](docs/troubleshooting.md) with the cause and the fix.
 
-Automated tests cover JSON and legacy config, display detection text, status text, the device catalog, switch command lines, and shell syntax. They do not talk to a monitor or USB bus.
+## What it cannot do
 
-```bash
-python3 -m unittest discover -s tests -v
-```
+- **It cannot recover a monitor that is showing nothing.** If the saved input
+  code is wrong, or that input has no active source, the screen goes black and
+  the program cannot tell. Bring the picture back with the monitor's own input
+  button, then run `configure` again.
+- **It cannot work with a KVM that switches video.** It needs a USB-only KVM,
+  with each machine keeping its own video cable to the shared monitor.
+- **It cannot help on a machine where DDC/CI is blocked or unsupported.** The
+  program sends a standard command and reports what the OS returned; a monitor
+  or cable that drops DDC traffic gets no switch.
 
-No extra packages. The stdlib `unittest` runner is enough.
-
-Check by hand when you change login install or the actual display switch:
-
-- `kvm-switcher.py switch` moves the monitor to the saved input
-- plugging a selected device switches once, and unplugging arms it again
-- `install` / `uninstall` register and remove the login entry (systemd user service, launchd agent, or Scheduled Task)
-
-On Windows, also confirm:
-
-- `configure` lists USB devices (it exits with `No USB devices found.` if the device scan is broken)
-- `switch` prints `Switched 1 monitor(s)` rather than `No monitor accepted input select.`
-- `status` says `Watcher: running` while the watcher is up, and `uninstall` leaves no `python.exe ... kvm-switcher.py` behind
+Building, testing, and releasing are in [CONTRIBUTING.md](CONTRIBUTING.md).
